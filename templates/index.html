@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI GP-50 Tone Builder</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body
+  data-search-timeout-ms="{{ search_request_timeout_ms }}"
+  data-build-timeout-ms="{{ build_rig_request_timeout_ms }}"
+  data-lm-base="{{ lm_base }}"
+>
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<div class="page">
+  <header class="page-header">
+    <h1>GP-50 Tone Builder</h1>
+    <p class="lede">
+      Describe the tone you want. We will recommend a complete preset using the
+      GP-50&rsquo;s built-in amps and cabs, with optional TONE3000 NAM captures to try.
+    </p>
+  </header>
+
+  <main id="main">
+    <div class="tabs" role="tablist" aria-label="Tone-builder workspace">
+      <button
+        type="button" id="builder-tab" class="tab"
+        role="tab" aria-selected="true" aria-controls="builder-panel" tabindex="0"
+      >GP-50 Tone Builder</button>
+      <button
+        type="button" id="search-tab" class="tab"
+        role="tab" aria-selected="false" aria-controls="search-panel" tabindex="-1"
+      >NAM Amp Finder</button>
+    </div>
+
+    <form id="search-form" class="search-form">
+      <label class="visually-hidden" for="q">Describe the tone you want</label>
+      <div class="searchbox">
+        <input
+          id="q" name="q" type="search" autofocus autocomplete="off"
+          placeholder="e.g. John Mayer Slow Dancing, warm edge-of-breakup Strat tone"
+        >
+        <button type="submit" id="go">Build my tone</button>
+      </div>
+
+      <div class="examples">
+        Try:
+        <ul class="examples-list">
+          <li><button type="button" class="example-chip">Comfortably Numb solo</button></li>
+          <li><button type="button" class="example-chip">AC/DC Back in Black rhythm</button></li>
+          <li><button type="button" class="example-chip">warm clean pedal platform for P90s</button></li>
+          <li><button type="button" class="example-chip">Foo Fighters crunch but less gain</button></li>
+        </ul>
+      </div>
+
+      <div class="option-row">
+        <label id="full-rigs-filter" class="filter" hidden>
+          <input id="full-rigs-only" type="checkbox" checked>
+          Limit optional NAM captures to full rigs
+          <span class="visually-hidden">(captures made with an amplifier and cabinet)</span>
+        </label>
+        <label class="filter">
+          <input id="web-research" type="checkbox" checked>
+          Research this tone on the web
+          <span class="visually-hidden">(looks up the tone/gear via DuckDuckGo before finding tones)</span>
+        </label>
+      </div>
+    </form>
+
+    <div id="status" class="panel" role="status" aria-live="polite">
+      <p><strong>How it works:</strong> describe your target tone, then build a preset
+      around the GP-50&rsquo;s own amp and cab models. TONE3000 captures appear
+      separately as optional files to download and test.</p>
+    </div>
+
+    <div id="builder-panel" role="tabpanel" aria-labelledby="builder-tab" tabindex="0">
+      <section id="intent" class="panel" hidden></section>
+      <section id="rig" class="panel rig-panel" hidden></section>
+    </div>
+
+    <div id="search-panel" role="tabpanel" aria-labelledby="search-tab" tabindex="0" hidden>
+      <div id="results-wrap"></div>
+    </div>
+  </main>
+</div>
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

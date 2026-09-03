@@ -1,0 +1,606 @@
+/* ==========================================================================
+   AI GP-50 Tone Builder — mobile-first stylesheet
+   Layout scales up via min-width breakpoints; base rules target small screens.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+  --bg: #101113;
+  --panel: #191b1f;
+  --panel-2: #202329;
+  --line: #30343b;
+  --text: #f4f4f4;
+  --muted: #b7bbc4; /* raised from #a9adb7 for stronger contrast on --bg */
+  --accent: #f3b33d;
+  --accent-ink: #191919; /* text on top of --accent */
+  --good: #8fdb9e; /* raised from #79d08a for stronger contrast on --panel-2 */
+  --danger: #ff9f9f;
+  --focus-ring: #7ec8ff;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 14px;
+
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Reset / base                                                            */
+/* ---------------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  line-height: 1.5;
+}
+
+img,
+svg {
+  max-width: 100%;
+  display: block;
+}
+
+/* Respect users who ask for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Single, consistent focus style for every interactive element. Removing the
+   default outline anywhere without replacing it fails WCAG 2.4.7. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  top: -100%;
+  left: var(--space-3);
+  background: var(--accent);
+  color: var(--accent-ink);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
+  font-weight: 700;
+  z-index: 100;
+}
+
+.skip-link:focus {
+  top: var(--space-3);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Layout                                                                  */
+/* ---------------------------------------------------------------------- */
+
+.page {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-4) var(--space-7);
+}
+
+.page-header {
+  margin-bottom: var(--space-5);
+}
+
+h1 {
+  font-size: 1.75rem;
+  margin: 0 0 var(--space-2);
+  letter-spacing: -0.02em;
+}
+
+.lede {
+  max-width: 60ch;
+  color: var(--muted);
+  margin: 0;
+  font-size: 1rem;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Tabs                                                                    */
+/* ---------------------------------------------------------------------- */
+
+.tabs {
+  display: flex;
+  gap: var(--space-2);
+  margin: var(--space-5) 0 var(--space-4);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+
+.tab {
+  /* No `white-space: nowrap` here on purpose: with it, each tab's min-content
+     width is its full label length, so on a narrow viewport the two tabs'
+     combined width can exceed the container and the second tab gets pushed
+     into .tabs's horizontal scroll — invisible, with no scrollbar or arrow
+     hinting it's there. Letting the label wrap instead means both tabs
+     always fit, just taller when the label needs two lines. */
+  flex: 1 1 auto;
+  min-width: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-bottom: none;
+  padding: var(--space-3) var(--space-3);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tab[aria-selected="true"] {
+  color: var(--text);
+  border-color: var(--line);
+  background: var(--panel);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Search form                                                             */
+/* ---------------------------------------------------------------------- */
+
+.search-form {
+  margin-bottom: var(--space-3);
+}
+
+.searchbox {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: var(--radius-lg);
+  /* Without a cap the input (flex:1) stretches to the full page width on a
+     wide viewport, leaving a huge dead gap after typed text next to a
+     comparatively tiny button. A search field this wide isn't easier to
+     use, just harder to read as one control. */
+  --max-width: 640px;
+}
+
+.searchbox input[type="search"] {
+  /* flex: 1 was dropped when this was extracted from the old inline <style>
+     (which had it on a bare `input` selector) — without it the input sizes
+     to its own intrinsic width instead of filling the row, leaving a dead
+     gap between the button and the box's border. min-width: 0 stops a flex
+     item's default content-based minimum from fighting that shrink/grow. */
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  padding: var(--space-3);
+  font-size: 1rem;
+  font-family: inherit;
+  min-height: 44px; /* comfortable touch target */
+}
+
+.searchbox input[type="search"]::placeholder {
+  color: var(--muted);
+}
+
+button {
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+  font-weight: 700;
+  font-family: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+  background: var(--accent);
+  color: var(--accent-ink);
+  min-height: 44px;
+}
+
+button.secondary {
+  /* A border that only matches --line (the same tone used for plain
+     panel/card edges) reads as a content divider, not a button edge —
+     especially sitting directly on --panel, which is barely lighter than
+     this button's own fill. Push both the fill and the border a clear step
+     lighter than their surroundings so the button silhouette is legible on
+     its own, without relying on the label text alone. */
+  background: #2a2f37;
+  color: var(--text);
+  font-weight: 600;
+  border: 1px solid #4a5058;
+}
+
+button.secondary:hover {
+  background: #333944;
+  border-color: #5a616b;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.examples {
+  margin: var(--space-3) 0 var(--space-5);
+  color: var(--muted);
+  font-size: 0.875rem;
+  line-height: 1.7;
+}
+
+.examples-list {
+  list-style: none;
+  padding: 0;
+  margin: var(--space-1) 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.example-chip {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: var(--space-1) var(--space-3);
+  font-size: 0.875rem;
+  font-weight: 500;
+  min-height: 36px;
+}
+
+.example-chip:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+
+.option-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-4) 0;
+}
+
+.filter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: #d7d9de;
+  font-size: 0.9375rem;
+  min-height: 32px;
+}
+
+.filter input {
+  accent-color: var(--accent);
+  width: 18px;
+  height: 18px;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Status / intent / rig panels                                           */
+/* ---------------------------------------------------------------------- */
+
+.panel {
+  margin: var(--space-4) 0;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  line-height: 1.5;
+}
+
+.panel h2,
+.panel h3 {
+  margin: 0 0 var(--space-2);
+  font-size: 0.875rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.panel p {
+  margin: 0;
+  color: #d7d9de;
+}
+
+.chips {
+  margin-top: var(--space-3);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  list-style: none;
+  padding: 0;
+}
+
+.chip {
+  font-size: 0.8125rem;
+  padding: var(--space-1) var(--space-2);
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: #c8cbd1;
+  background: var(--panel-2);
+}
+
+.rig-guide {
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-4);
+}
+
+.rig-guide strong {
+  color: var(--text);
+}
+
+.rig-guide > p {
+  color: #d7d9de;
+}
+
+.rig-guide button {
+  margin-top: var(--space-3);
+}
+
+.effect {
+  margin-top: var(--space-2);
+  color: #d7d9de;
+  line-height: 1.55;
+  font-size: 0.9375rem;
+}
+
+.effect .effect-meta {
+  color: var(--muted);
+}
+
+.error-text {
+  color: var(--danger);
+  white-space: pre-wrap;
+}
+
+.research-notes {
+  margin-top: var(--space-3);
+}
+
+.research-notes textarea {
+  width: 100%;
+  min-height: 160px;
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font: 0.8125rem/1.5 var(--font-mono);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Rig output                                                              */
+/* ---------------------------------------------------------------------- */
+
+.rig-panel {
+  border-color: var(--accent);
+}
+
+.rig-panel h2 {
+  color: var(--accent);
+  font-size: 1.125rem;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.rig-panel textarea {
+  width: 100%;
+  min-height: 220px;
+  margin: var(--space-2) 0;
+  padding: var(--space-3);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font: 0.75rem/1.5 var(--font-mono);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Result cards                                                            */
+/* ---------------------------------------------------------------------- */
+
+.results-heading {
+  font-size: 1rem;
+  margin: var(--space-5) 0 var(--space-1);
+}
+
+.results-intro {
+  color: var(--muted);
+  font-size: 0.9375rem;
+  margin: 0 0 var(--space-3);
+}
+
+.results {
+  display: grid;
+  gap: var(--space-3);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.card {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
+}
+
+.score {
+  width: fit-content;
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-3);
+  background: var(--panel-2);
+  border: 1px solid #3d424b;
+  font-weight: 800;
+  font-size: 1rem;
+  color: var(--good);
+}
+
+.titleline {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.titleline h3 {
+  margin: 0;
+  font-size: 1.0625rem;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text);
+}
+
+.meta {
+  margin: var(--space-2) 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.reason {
+  line-height: 1.5;
+  margin: var(--space-2) 0;
+  color: #e1e2e5;
+}
+
+.links {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  flex-wrap: wrap;
+}
+
+a.btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  text-decoration: none;
+  background: #2a2f37;
+  color: var(--text);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  font-weight: 650;
+  border: 1px solid #4a5058;
+}
+
+a.btn:hover {
+  background: #333944;
+  border-color: #5a616b;
+}
+
+.models {
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-2);
+  list-style: none;
+  padding-left: 0;
+}
+
+.model {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-2) 0;
+  color: #d9dbe0;
+  font-size: 0.8125rem;
+  flex-wrap: wrap;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Breakpoints — enhancements for larger viewports                        */
+/* ---------------------------------------------------------------------- */
+
+@media (min-width: 560px) {
+  .searchbox {
+    flex-direction: row;
+  }
+
+  .option-row {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-5);
+  }
+}
+
+@media (min-width: 700px) {
+  .page {
+    padding: var(--space-7) var(--space-6) var(--space-7);
+  }
+
+  h1 {
+    font-size: 2.375rem;
+  }
+
+  .lede {
+    font-size: 1.0625rem;
+  }
+
+  .card {
+    grid-template-columns: auto 1fr;
+    align-items: start;
+  }
+
+  .score {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    font-size: 1.1875rem;
+  }
+}
+
+@media (min-width: 900px) {
+  .panel {
+    padding: var(--space-5) var(--space-6);
+  }
+}
