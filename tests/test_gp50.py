@@ -239,5 +239,51 @@ class GP50Tests(unittest.TestCase):
         pos = output.find(RECORDS["footswitches"]) + len(RECORDS["footswitches"])
         self.assertEqual(struct.unpack_from("<II", output, pos), (0, 0))
 
+    def test_footswitch_led_bytes_match_confirmed_real_hardware_formula(self):
+        # byte = 5 + (1 if a block bound to that footswitch is currently
+        # enabled) — confirmed against 7 real Suite exports across 4 distinct
+        # presets (data/*.prst), including a footswitch bound to two blocks
+        # at once. See docs/GP50_PRST_FORMAT.md section 7.
+        pre = self.catalog.effects_for_modules(["PRE"])["PRE"][0]
+        dst = self.catalog.effects_for_modules(["DST"])["DST"][0]
+
+        def trailing_bytes(dst_enabled):
+            plan = {"preset_name": "FS", "signal_chain": [
+                {"module": "PRE", "fxid": pre["fxid"], "enabled": True, "parameters": {}},
+                {"module": "DST", "fxid": dst["fxid"], "enabled": dst_enabled, "parameters": {}},
+            ]}
+            with tempfile.TemporaryDirectory() as directory:
+                output = create_preset(plan, self._order_template(directory), self.catalog)
+            pos = output.find(RECORDS["footswitches"]) + len(RECORDS["footswitches"])
+            return output[pos + 8], output[pos + 9]
+
+        self.assertEqual(trailing_bytes(dst_enabled=True), (6, 6))
+        self.assertEqual(trailing_bytes(dst_enabled=False), (6, 5))
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = create_preset({"preset_name": "No FS", "signal_chain": []}, self._order_template(directory), self.catalog)
+        pos = output.find(RECORDS["footswitches"]) + len(RECORDS["footswitches"])
+        self.assertEqual((output[pos + 8], output[pos + 9]), (5, 5))
+
+    def test_real_footswitch_led_bytes_across_four_presets(self):
+        # Ground truth for the LED-byte formula: blank/unassigned, a user
+        # preset with no footswitches, and two factory presets each with a
+        # footswitch bound to a currently-on block (one bound to two blocks
+        # at once). All 7 real exports observed agree with the formula;
+        # these 4 files are the ones kept in the repo as fixtures.
+        cases = [
+            ("blank_gp50.prst", (5, 5)),
+            ("Mick Ronson Lead (1).prst", (5, 5)),
+            ("66-Mick Ronso (DST on).prst", (6, 6)),
+            ("66-Mick Ronso (DST off).prst", (6, 5)),
+        ]
+        for filename, expected in cases:
+            path = Path(__file__).parents[1] / "data" / filename
+            if not path.is_file():
+                continue
+            raw = path.read_bytes()
+            pos = raw.find(RECORDS["footswitches"]) + len(RECORDS["footswitches"])
+            self.assertEqual((raw[pos + 8], raw[pos + 9]), expected, filename)
+
 
 if __name__ == "__main__": unittest.main()

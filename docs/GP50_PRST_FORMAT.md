@@ -184,16 +184,17 @@ chain/model state.
 drewmerc302's project hypothesizes a trailer record, magic `03 00 0A 00`,
 holding `[FS1 u32][FS2 u32]` plus 2 trailing bytes, implemented in their
 `app/patchlib.py:_footswitches()` (each mask's bit `k` = block index `k`,
-§3 — the same footswitch toggles every set bit, "≤2 bits" per their
-comment, though every real example here has exactly one bit per mask).
+§3 — the same footswitch toggles every set bit it has; a mask can have
+more than one bit — confirmed in `data/01-Neo Soul (factory).prst`, whose
+FS2 is bound to both DLY and RVB at once).
 
 This project's earlier draft of this document listed this as unconfirmed,
 because reading it from `data/blank_gp50.prst` and `data/Mick Ronson Lead
 (1).prst` returned `0` for both masks in both files — which turned out to
 simply be correct (neither preset has a footswitch assigned), not a sign
-the location was wrong. **Now confirmed** against
-`data/66-Mick Ronso (DST on/off).prst` — the same real-hardware pair as
-§6, where the user physically pressed footswitch 2 to toggle DST:
+the location was wrong. **Confirmed** against `data/66-Mick Ronso (DST
+on/off).prst` — a real-hardware pair where the user physically pressed
+footswitch 2 to toggle DST:
 
 ```
 offset 542 (+4 magic): fs1 = 0x00000002  (bit 1 = PRE)
@@ -206,7 +207,10 @@ controls, and — critically — **both masks are byte-identical whether
 DST's own bypass bit is on or off**. So the footswitch-to-block assignment
 is confirmed independent of the block's current on/off state, exactly
 like a real pedalboard footswitch binding should behave (the assignment
-persists; only the toggle state changes when you step on it).
+persists; only the toggle state changes when you step on it). Two further
+factory presets (`data/05-Pure Clean (factory).prst`,
+`data/01-Neo Soul (factory).prst`) and a user-built one
+(`data/56-IX50 (user).prst`) corroborate the same mask/bit scheme.
 
 **Implemented**: `gp50/preset.py`'s `create_preset()` now writes this
 record via `_assign_footswitches()` — FS1 is bound to PRE and FS2 to DST
@@ -215,10 +219,24 @@ its own enabled/bypass flag, matching the confirmed independence above);
 a slot with no matching block keeps whatever the template already has
 there (the blank template's `0`/unassigned).
 
-The two trailing bytes (550, 551) are *not* written by this project — they
-don't fit a "count of enabled blocks" theory (`blank_gp50.prst`, 0 blocks
-enabled, and `Mick Ronson Lead (1).prst`, 3 enabled, are both `05 05`) and
-their exact meaning is unconfirmed; see §9.
+**The two trailing bytes are also confirmed and implemented**: a
+derived LED-state cache, `byte = 5 + (1 if a block bound to that
+footswitch is currently enabled, else 0)`. Verified against all 7 real
+exports collected across 4 distinct presets:
+
+| File | fs1 → | fs2 → | bytes 550,551 | matches formula |
+|---|---|---|---:|---|
+| `blank_gp50.prst` | — | — | `05 05` | yes (nothing assigned) |
+| `56-IX50 (user).prst` | — | — | `05 05` | yes (nothing assigned) |
+| `Mick Ronson Lead (1).prst` | — | — | `05 05` | yes (PRE/DST/DLY are *on*, but unassigned — proves the baseline isn't just "anything enabled") |
+| `66-Mick Ronso (DST on).prst` | PRE (on) | DST (on) | `06 06` | yes |
+| `66-Mick Ronso (DST off).prst` | PRE (on) | DST (off) | `06 05` | yes |
+| `05-Pure Clean (factory).prst` | MOD (on) | RVB (on) | `06 06` | yes |
+| `01-Neo Soul (factory).prst` | DST (on) | DLY+RVB (both on) | `06 06` | yes |
+
+`gp50/preset.py`'s `_assign_footswitches()` computes and writes these
+bytes from the final fs1/fs2 masks and the bypass mask, rather than
+copying the template's (always-stale) value.
 
 ## 8. Params record
 
@@ -257,19 +275,35 @@ that catalogue's own audit against the firmware manual).
   not a live reflection of what's currently on. Why *this specific*
   preset's saved arrangement isn't a valid permutation is still open —
   ruling out the enabled-prefix theory narrows it, but doesn't resolve it.
-  Would need a live device read of this same patch (bypassing Suite's
-  export) to check whether the live protocol reports a clean permutation
-  for it. This project's response is unaffected either way: §5's policy is
-  to never write to this record.
+  A second theory — that factory-authored presets skip whatever live-device
+  validation enforces the permutation invariant, so it'd only hold for
+  presets actually built/reordered on-device — is also **disproven**:
+  `data/05-Pure Clean (factory).prst` and `data/01-Neo Soul (factory).prst`
+  are both genuine factory presets (user-confirmed) with many blocks
+  enabled, and both have the exact clean default order,
+  `[0, 1, 2, 9, 3, 4, 5, 6, 7, 8]` — identical to blank's. So does
+  `data/56-IX50 (user).prst`, a preset the user built themselves. Of **7**
+  real exports now collected, across **6 distinct presets**, exactly **one**
+  preset (the "Mick Ronson"/slot-66 one, seen 3 times) has a non-permutation
+  order record; every other one — factory or user-built, many blocks
+  enabled or none — matches blank's untouched default exactly. This means
+  chain reordering essentially never happens in practice (nobody drags
+  blocks around, factory content included), and whatever produced this one
+  preset's unusual value is a **one-off**, not a general Suite-export or
+  factory-content behavior.
 
-  The same controlled pair also revealed one unexplained byte: the very
-  last byte of the file (offset `0x227`/551) changed `6 → 5` alongside the
-  DST toggle. This turned out to be the second of the footswitch trailer's
-  two trailing bytes (§7) — a coincidence of file layout, not a separate
-  record. Its meaning is still unconfirmed (doesn't track bypass-bit
-  popcount in general — `data/blank_gp50.prst`, 0 bits set, and
-  `Mick Ronson Lead (1).prst`, 3 bits set, are both `05`), and this project
-  does not write to it.
+  A "the user manually drag-reordered this one" theory was the natural next
+  guess, but the user does not recall ever doing so for this preset — and
+  reports that the one preset they're certain they built and reordered
+  themselves (`data/56-IX50 (user).prst`) has the clean default order, not
+  a scrambled one. So a deliberate reorder isn't a confirmed explanation
+  either; this remains a genuine, unresolved one-off. **Stays open** with
+  no further lead at this point — closing it would need either a live
+  device read of that exact preset (bypassing Suite's export, to check
+  whether the live protocol reports the same non-permutation value or a
+  clean one) or another preset that happens to reproduce the same pattern.
+  Not investigated further absent new evidence. This project's response is
+  unaffected either way: §5's policy is to never write to this record.
 
 - **SnapTone's binary payload encoding is unconfirmed.** Both projects agree
   the models/bypass/order/params records don't encode SnapTone capture data

@@ -64,14 +64,29 @@ class PresetError(ValueError): pass
 # most commonly footswitched effect types are live-toggleable on the real
 # unit; a slot with no matching block keeps whatever the template already
 # has there.
+#
+# The record's last 2 bytes (one per footswitch) are a derived LED-state
+# cache, not independent data: confirmed against 7 real exports across 4
+# distinct presets (blank/unassigned, a user preset with no footswitches,
+# and three presets with footswitches bound — one to two blocks per switch)
+# — `byte = 5 + (1 if a block bound to that footswitch is currently
+# enabled/on)`. Fully derivable from the bypass mask and the fs1/fs2 masks
+# above, so this module computes and writes it rather than copying the
+# template's stale value.
 FOOTSWITCH_ASSIGNMENTS = {"fs1": "PRE", "fs2": "DST"}
+_FOOTSWITCH_LED_BASELINE = 5
 
 
-def _assign_footswitches(data: bytearray, offset: int, rig: dict[str, Any], catalog: GP50Catalog) -> None:
+def _assign_footswitches(data: bytearray, offset: int, rig: dict[str, Any], catalog: GP50Catalog, enabled_mask: int) -> None:
     present = {canonical_module(block["module"]) for block in rig["signal_chain"]}
     for i, module in enumerate(FOOTSWITCH_ASSIGNMENTS.values()):
         if module in present:
             struct.pack_into("<I", data, offset + i * 4, 1 << catalog.module_id(module))
+        # Recompute the LED byte from whatever mask ends up in the file
+        # (ours, or the template's preserved one if we left it alone), not
+        # just this call's own assignment decision.
+        final_mask = struct.unpack_from("<I", data, offset + i * 4)[0]
+        data[offset + 8 + i] = _FOOTSWITCH_LED_BASELINE + (1 if final_mask & enabled_mask else 0)
 
 
 def crc8_07(data: bytes) -> int:
@@ -126,6 +141,6 @@ def create_preset(plan: dict[str, Any], template: str | Path | None = None, cata
     # code (removed): the template's default order is already a correct,
     # conventional signal chain, and there is no per-request signal to
     # justify writing a different one.
-    _assign_footswitches(data, footswitches, rig, catalog)
+    _assign_footswitches(data, footswitches, rig, catalog, enabled_mask)
     data[0x14] = crc8_07(bytes(data[0x15:]))
     return bytes(data)
