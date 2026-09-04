@@ -243,6 +243,61 @@ class GP50Tests(unittest.TestCase):
         pos = output.find(RECORDS["footswitches"]) + len(RECORDS["footswitches"])
         self.assertEqual(struct.unpack_from("<II", output, pos), (0, 0))
 
+    def test_footswitches_fall_back_to_mod_and_dly_when_pre_and_dst_are_absent(self):
+        # Software policy, not hardware-confirmed fact (see FOOTSWITCH_ASSIGNMENTS'
+        # own comment): MOD/DLY are the next most commonly footswitched effect
+        # types on a real pedalboard, so a rig with neither PRE nor DST still
+        # gets musically sensible footswitches instead of both left pointing
+        # at nothing.
+        mod = self.catalog.effects_for_modules(["MOD"])["MOD"][0]
+        dly = self.catalog.effects_for_modules(["DLY"])["DLY"][0]
+        amp = self.catalog.effects_for_modules(["AMP"])["AMP"][0]
+        plan = {"preset_name": "FS Fall", "signal_chain": [
+            {"module": "AMP", "fxid": amp["fxid"], "enabled": True, "parameters": {}},
+            {"module": "MOD", "fxid": mod["fxid"], "enabled": True, "parameters": {}},
+            {"module": "DLY", "fxid": dly["fxid"], "enabled": True, "parameters": {}},
+        ]}
+        with tempfile.TemporaryDirectory() as directory:
+            output = create_preset(plan, self._order_template(directory), self.catalog)
+        pos = output.find(RECORDS["footswitches"]) + len(RECORDS["footswitches"])
+        fs1, fs2 = struct.unpack_from("<II", output, pos)
+        self.assertEqual(fs1, 1 << self.catalog.module_id("MOD"))
+        self.assertEqual(fs2, 1 << self.catalog.module_id("DLY"))
+
+    def test_pre_and_dst_still_win_over_mod_and_dly_when_both_present(self):
+        pre = self.catalog.effects_for_modules(["PRE"])["PRE"][0]
+        dst = self.catalog.effects_for_modules(["DST"])["DST"][0]
+        mod = self.catalog.effects_for_modules(["MOD"])["MOD"][0]
+        dly = self.catalog.effects_for_modules(["DLY"])["DLY"][0]
+        plan = {"preset_name": "FS Prio", "signal_chain": [
+            {"module": "PRE", "fxid": pre["fxid"], "enabled": True, "parameters": {}},
+            {"module": "DST", "fxid": dst["fxid"], "enabled": True, "parameters": {}},
+            {"module": "MOD", "fxid": mod["fxid"], "enabled": True, "parameters": {}},
+            {"module": "DLY", "fxid": dly["fxid"], "enabled": True, "parameters": {}},
+        ]}
+        with tempfile.TemporaryDirectory() as directory:
+            output = create_preset(plan, self._order_template(directory), self.catalog)
+        pos = output.find(RECORDS["footswitches"]) + len(RECORDS["footswitches"])
+        fs1, fs2 = struct.unpack_from("<II", output, pos)
+        self.assertEqual(fs1, 1 << self.catalog.module_id("PRE"))
+        self.assertEqual(fs2, 1 << self.catalog.module_id("DST"))
+
+    def test_footswitch_falls_back_on_only_one_side(self):
+        # PRE present (no fallback needed for fs1), DST absent but DLY
+        # present (fs2 should fall back).
+        pre = self.catalog.effects_for_modules(["PRE"])["PRE"][0]
+        dly = self.catalog.effects_for_modules(["DLY"])["DLY"][0]
+        plan = {"preset_name": "FS Mixed", "signal_chain": [
+            {"module": "PRE", "fxid": pre["fxid"], "enabled": True, "parameters": {}},
+            {"module": "DLY", "fxid": dly["fxid"], "enabled": True, "parameters": {}},
+        ]}
+        with tempfile.TemporaryDirectory() as directory:
+            output = create_preset(plan, self._order_template(directory), self.catalog)
+        pos = output.find(RECORDS["footswitches"]) + len(RECORDS["footswitches"])
+        fs1, fs2 = struct.unpack_from("<II", output, pos)
+        self.assertEqual(fs1, 1 << self.catalog.module_id("PRE"))
+        self.assertEqual(fs2, 1 << self.catalog.module_id("DLY"))
+
     def test_footswitch_led_bytes_match_confirmed_real_hardware_formula(self):
         # byte = 5 + (1 if a block bound to that footswitch is currently
         # enabled) — confirmed against 7 real Suite exports across 4 distinct

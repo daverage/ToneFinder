@@ -196,7 +196,11 @@
     const effects = (i.effects || [])
       .map(
         (effect) => `
-      <div class="effect"><strong>${esc(effect.name)}</strong> &mdash; ${esc(effect.purpose)}
+      <div class="effect"><strong>${esc(effect.name)}</strong>${
+          effect.requested_as
+            ? ` <span class="effect-meta">(standing in for "${esc(effect.requested_as)}" — no direct GP-50 equivalent)</span>`
+            : ""
+        } &mdash; ${esc(effect.purpose)}
       <span class="effect-meta">(${esc(effect.starting_point)})</span></div>
     `
       )

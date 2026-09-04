@@ -86,6 +86,49 @@ class RigSalvageTests(unittest.TestCase):
         self.assertIsNotNone(rig)
         self.assertEqual(rig["signal_chain"][0]["effect_name"], "C-Wah")
 
+    def test_an_amp_named_exactly_but_missing_fxid_is_salvaged(self):
+        # Real observed failure (gemma-4-12B-it-4bit, a run large enough that
+        # its structured-output enforcement wasn't fully honored despite a
+        # 200 response): the model returned {"module": "AMP", "name": "UK
+        # 800", "type": "Drive"} for a signal_chain item -- the catalogue's
+        # own reference-entry shape, not the requested block shape, and no
+        # fxid at all. _resolve_missing_fxid deliberately excludes AMP/CAB/NR
+        # (their own pickers use request-level terms + family-pairing on the
+        # normal path), so before _resolve_by_exact_name this block was
+        # silently dropped -- discarding a real, correct catalogue name the
+        # model already got right, in favor of build_rig's own independent
+        # amp guess.
+        catalog = GP50Catalog()
+        uk800 = next(e for e in catalog.effects_for_modules(["AMP"])["AMP"] if e["name"] == "UK 800")
+        rig = _salvage_valid_blocks({"preset_name": "Test", "signal_chain": [
+            {"module": "AMP", "name": "UK 800", "type": "Drive"},
+        ]}, catalog)
+        self.assertIsNotNone(rig)
+        self.assertEqual(rig["signal_chain"][0]["fxid"], uk800["fxid"])
+
+    def test_a_cab_named_exactly_but_missing_fxid_is_salvaged(self):
+        catalog = GP50Catalog()
+        ev4x12 = next(e for e in catalog.effects_for_modules(["CAB"])["CAB"] if e["name"] == "EV 4x12")
+        rig = _salvage_valid_blocks({"preset_name": "Test", "signal_chain": [
+            {"module": "CAB", "name": "EV 4x12", "type": "Large Cab", "profile": "Large Cab:EV 4x12"},
+        ]}, catalog)
+        self.assertIsNotNone(rig)
+        self.assertEqual(rig["signal_chain"][0]["fxid"], ev4x12["fxid"])
+
+    def test_exact_name_match_is_case_insensitive_and_module_scoped(self):
+        # A name that matches an effect in the WRONG module must not resolve
+        # -- exact-name salvage is deliberately per-module, same as every
+        # other resolution path in this file.
+        catalog = GP50Catalog()
+        uk800 = next(e for e in catalog.effects_for_modules(["AMP"])["AMP"] if e["name"] == "UK 800")
+        rig = _salvage_valid_blocks({"preset_name": "Test", "signal_chain": [
+            {"module": "AMP", "name": "uk 800"},
+        ]}, catalog)
+        self.assertEqual(rig["signal_chain"][0]["fxid"], uk800["fxid"])
+        self.assertIsNone(_salvage_valid_blocks({"preset_name": "Test", "signal_chain": [
+            {"module": "CAB", "name": "UK 800"},
+        ]}, catalog))
+
     def test_missing_preset_name_falls_back_to_the_request_text_not_a_fixed_default(self):
         catalog = GP50Catalog()
         amp = catalog.effects_for_modules(["AMP"])["AMP"][0]

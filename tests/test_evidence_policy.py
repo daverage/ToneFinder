@@ -4,11 +4,15 @@ from unittest.mock import patch
 import tone_finder
 
 
-def _effect(name="Delay", basis="researched", status="confirmed", importance="important", required=False, purpose="test", starting_point="test"):
+def _effect(
+    name="Delay", basis="researched", status="confirmed", importance="important", required=False,
+    purpose="test", starting_point="test", hardware_available=True, substitute_suggestion=None,
+):
     return {
         "name": name, "purpose": purpose, "starting_point": starting_point,
         "selection_basis": basis, "evidence_status": status,
         "importance": importance, "required": required,
+        "hardware_available": hardware_available, "substitute_suggestion": substitute_suggestion,
     }
 
 
@@ -31,6 +35,71 @@ class CoercionTests(unittest.TestCase):
     def test_coerce_effect_provenance_accepts_valid_importance_tiers(self):
         for tier in ("essential", "important", "supporting", "optional"):
             self.assertEqual(tone_finder._coerce_effect_provenance({"importance": tier.upper()})["importance"], tier)
+
+    def test_coerce_effect_provenance_defaults_hardware_fields(self):
+        coerced = tone_finder._coerce_effect_provenance({"name": "Delay"})
+        self.assertTrue(coerced["hardware_available"])
+        self.assertIsNone(coerced["substitute_suggestion"])
+
+    def test_coerce_effect_provenance_keeps_substitute_suggestion_text(self):
+        coerced = tone_finder._coerce_effect_provenance({
+            "hardware_available": False, "substitute_suggestion": "  touch-responsive envelope filter  ",
+        })
+        self.assertFalse(coerced["hardware_available"])
+        self.assertEqual(coerced["substitute_suggestion"], "touch-responsive envelope filter")
+
+
+class HardwareSubstitutionTests(unittest.TestCase):
+    def test_swaps_in_the_substitute_and_preserves_the_original_request(self):
+        talk_box = _effect(
+            name="Talk Box", purpose="Iconic intro hook effect", hardware_available=False,
+            substitute_suggestion="Touch-responsive envelope filter (auto-wah)",
+        )
+        [result] = tone_finder._apply_hardware_substitutions([talk_box])
+        self.assertEqual(result["name"], "Touch-responsive envelope filter (auto-wah)")
+        self.assertEqual(result["requested_as"], "Talk Box")
+        self.assertIn('Closest achievable substitute for "Talk Box"', result["purpose"])
+        self.assertIn("Iconic intro hook effect", result["purpose"])
+
+    def test_leaves_available_effects_unchanged(self):
+        delay = _effect(name="Delay", hardware_available=True)
+        [result] = tone_finder._apply_hardware_substitutions([delay])
+        self.assertEqual(result, delay)
+        self.assertNotIn("requested_as", result)
+
+    def test_leaves_effect_unchanged_when_no_substitute_was_offered(self):
+        # A model that marks hardware_available=false but omits a substitute
+        # (schema violation aside, be defensive) shouldn't crash or silently
+        # invent one — it just can't be helped here.
+        broken = _effect(name="Talk Box", hardware_available=False, substitute_suggestion=None)
+        [result] = tone_finder._apply_hardware_substitutions([broken])
+        self.assertEqual(result["name"], "Talk Box")
+        self.assertNotIn("requested_as", result)
+
+    def test_overrides_a_false_hardware_available_claim_the_catalogue_contradicts(self):
+        # Real observed bug: make_search_plan has no catalogue access at all
+        # (it's the local model's own generic guess), and guessed wrong —
+        # it named the effect "Dunlop Cry Baby Wah" and still marked it
+        # unavailable, even though the GP-50's own C-Wah has origin "Dunlop
+        # Cry Baby" verbatim. The catalogue is the authority here, not the
+        # interpretation model's claim about it.
+        cry_baby = _effect(
+            name="Dunlop Cry Baby Wah", purpose="Talkbox emulation", hardware_available=False,
+            substitute_suggestion="Touch-responsive envelope filter or wah",
+        )
+        [result] = tone_finder._apply_hardware_substitutions([cry_baby])
+        self.assertTrue(result["hardware_available"])
+        self.assertIsNone(result["substitute_suggestion"])
+        self.assertEqual(result["name"], "Dunlop Cry Baby Wah")
+        self.assertNotIn("requested_as", result)
+
+    def test_does_not_override_a_genuine_hardware_gap(self):
+        talk_box = _effect(
+            name="Talk Box", purpose="Iconic intro hook effect", hardware_available=False,
+            substitute_suggestion="Touch-responsive envelope filter (auto-wah)",
+        )
+        [result] = tone_finder._apply_hardware_substitutions([talk_box])
+        self.assertEqual(result["requested_as"], "Talk Box")
 
 
 class ImportanceWeightTests(unittest.TestCase):
@@ -114,6 +183,24 @@ class EvidencePolicyTests(unittest.TestCase):
 
 
 class MakeSearchPlanIntegrationTests(unittest.TestCase):
+    def test_make_search_plan_resolves_a_hardware_substitute_end_to_end(self):
+        response = {
+            "mode": "song_reconstruction", "artist": "Bon Jovi", "song": "Livin' on a Prayer",
+            "styles": [], "amp_families": ["Marshall"], "character": [], "gain": "high",
+            "pickup": None, "guitar": "", "requested_changes": [],
+            "effects": [_effect(
+                name="Talk Box", basis="researched", status="confirmed", required=True,
+                purpose="Iconic intro hook effect", hardware_available=False,
+                substitute_suggestion="Touch-responsive envelope filter (auto-wah)",
+            )],
+            "summary": "test", "search_queries": ["a", "b", "c"], "reference_settings": [],
+        }
+        with patch("tone_finder.lm_json", return_value=response):
+            plan = tone_finder.make_search_plan("Livin' on a Prayer opening riff")
+        [effect] = plan["effects"]
+        self.assertEqual(effect["name"], "Touch-responsive envelope filter (auto-wah)")
+        self.assertEqual(effect["requested_as"], "Talk Box")
+
     def test_make_search_plan_filters_effects_through_the_evidence_policy(self):
         response = {
             "mode": "song_reconstruction", "artist": "Test Artist", "song": "Test Song",

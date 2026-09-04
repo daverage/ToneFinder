@@ -78,6 +78,15 @@ def api_create_preset():
 
 if __name__ == "__main__":
     tone_finder.autostart_llm_if_configured()
+    # autostart's own prints only cover the one path where it actually
+    # launches a fresh mlx_lm.server; this covers every path (autostart,
+    # reusing an already-running server, or LMSTUDIO_BASE pointed at LM
+    # Studio directly) with one reliable line — best-effort, since the
+    # server may still not be reachable at all (nothing configured yet).
+    try:
+        print(f"Local LLM: {tone_finder.lm_model()} ({tone_finder.LMSTUDIO_BASE})")
+    except Exception as exc:
+        print(f"Local LLM: not reachable at {tone_finder.LMSTUDIO_BASE} yet ({exc})")
     print(f"AI GP-50 Tone Builder — http://{tone_finder.HOST}:{tone_finder.PORT}")
     app.run(
         host=tone_finder.HOST, port=tone_finder.PORT, debug=False,

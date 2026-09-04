@@ -78,6 +78,52 @@ semantic by construction, so nothing is filtered. Rejected effects are kept
 why instead of a preset that's just quietly thinner than the model's actual
 answer.
 
+A surviving effect can also carry `hardware_available` (bool) and, when
+false, `substitute_suggestion` — for an effect a typical multi-effects
+pedal/modeler genuinely cannot produce at all (a talk box, an EBow, a
+rotary/Leslie speaker), not merely one the GP-50's specific catalogue
+happens to lack a *model* of. Without this, such an effect could still pass
+`_apply_evidence_policy` (it can be `confirmed`/`required`) but silently
+produce nothing in the built preset: `gp50/rig_builder.py`'s
+`_relevant_modules` keyword-matches an effect's own name/purpose text
+against the catalogue's module keywords, and e.g. "talk box" matches none of
+them, so its module is never even offered in `build_rig`'s schema — the
+request just vanishes from the generated rig with no explanation.
+`tone_finder._apply_hardware_substitutions` (run once, right after
+`_apply_evidence_policy`, on the same already-filtered `plan["effects"]`)
+folds the model's own `substitute_suggestion` into the `name`/`purpose` text
+`_relevant_modules`/`build_rig` actually read — e.g. "touch-responsive
+envelope filter (auto-wah)" for a talk box hits the same
+`keyword_modules()` entries a genuine wah/filter request would — while
+keeping the original request visible as `requested_as`, so
+`static/js/app.js`'s `renderIntent` can show "Touch-responsive envelope
+filter (standing in for 'Talk Box' — no direct GP-50 equivalent)" instead of
+presenting the substitute as if it were what was actually asked for. This
+stage has no catalogue access (see "Two independent halves" above) so the
+model is asked for a generic effect family/character, never a GP-50 model
+name — the catalogue-aware resolution (which specific fxid) still happens
+exactly the same way it does for any other effect, via the existing
+keyword-matching and `score_effect_relevance`-based candidate scoring.
+
+Because that stage has no catalogue access, `hardware_available=false` is
+only ever the interpretation model's own guess, and confirmed wrong in
+practice, not hypothetically: a request naming "Dunlop Cry Baby Wah" was
+still marked unavailable despite the prompt explicitly saying wah effects
+are almost always available, while the GP-50's own `C-Wah` has `origin`
+"Dunlop Cry Baby" verbatim. `_apply_hardware_substitutions` now checks the
+real catalogue first, via `GP50Catalog.has_device_named` (a *majority*
+word-overlap between the claimed device name and some effect's own
+`name`/`origin` — not a bare intersection, since a single shared word is a
+real false-positive risk: "Talk Box" coincidentally shares "box" with an
+unrelated pedal, `La Charger`/"MI Audio Crunch Box"). When the catalogue
+does have it, `hardware_available` is flipped back to `true` and no
+substitution happens — the catalogue overrides the model's claim about it,
+consistent with "the catalogue decides availability." This is the one
+place `tone_finder.py` imports from `gp50` (a one-directional exception to
+"Two independent halves", noted at that import) — a small, deliberate
+crossing to fix a real correctness bug, not a general loosening of the
+boundary.
+
 `importance` (also asked of every effect) is a categorical tier —
 `essential`/`important`/`supporting`/`optional` — not a 0.0–1.0 float: a
 small local model can reliably distinguish "essential" from "optional" but
@@ -89,15 +135,16 @@ intentionally not yet consumed by anything — it's forward-compatible data for
 a future slot-conflict/critic pass, not wired into today's filtering or into
 `_keep_best_per_module`'s existing tie-breaking.
 
-Both `make_search_plan`/`make_amp_requirements` (`tone_finder.py`) and
-`build_rig` (`gp50/rig_builder.py`) wrap externally-sourced content —
-`web_research()`'s live-fetched web text above all — in explicit
-`<user_request>`/`<verified_research>`/`<data>` tags, with a system-prompt
-sentence telling the model that content inside those tags is data, never
-instructions. `web_research()` fetches live third-party page text (via
-DuckDuckGo), so without this a page containing something like "ignore
-previous instructions" would reach the model with no textual signal that
-it's content to reason *about*, not content to *obey*.
+`make_search_plan`/`make_amp_requirements`/`rerank` (`tone_finder.py`) and
+`build_rig` (`gp50/rig_builder.py`) all wrap externally-sourced content in
+explicit `<user_request>`/`<verified_research>`/`<interpreted_intent>`/
+`<candidates>`/`<data>` tags, with a system-prompt sentence telling the model
+that content inside those tags is data, never instructions. Two distinct
+sources need this: `web_research()`'s live-fetched web text (DuckDuckGo), and
+`rerank`'s TONE3000 candidate titles/descriptions (community-submitted, not
+vetted by this app). Without this, a page or a tone upload containing
+something like "ignore previous instructions" would reach the model with no
+textual signal that it's content to reason *about*, not content to *obey*.
 
 This was scoped deliberately narrow: it does not add per-category (guitar/
 amp/pedals/tuning) targeted web research (`web_research` is still one
@@ -208,6 +255,42 @@ of *why* a PRE choice and a MOD choice are different kinds of constraint.
 prompt, generated from `shared_effect_slots()` (so it can't drift from the
 catalogue), rather than leaving it implicit in the JSON's module grouping.
 
+`_relevant_modules`'s keyword-substring matching (against `catalog.
+keyword_modules()`, aggregated per module) is checked per effect, not on one
+joined blob of every proposed effect's text — this matters because when it
+finds nothing for a given effect, `_fallback_module_for_effect` runs next: it
+scores every catalogue effect via `gp50.catalog.descriptor_relevance` (the
+character/keywords/roles/best_for/description component of
+`score_effect_relevance`, deliberately *without* its name/origin/type
+identity bonus) and offers the best-scoring module if it clears
+`_MODULE_FALLBACK_MIN_SCORE`. This exists because an effect the GP-50
+genuinely has no model of (a talk box, an EBow) previously vanished from the
+built preset with no trace: its own text ("TalkBox", "vocal-like guitar
+sound") matches no module's keywords, so that module was never even offered
+in `build_rig`'s schema — no id existed for the LLM to pick even if it
+wanted to. `tone_finder.py`'s `hardware_available`/`substitute_suggestion`
+(see above) exists for this same problem, but depends on the interpretation
+model correctly self-reporting unavailability — confirmed unreliable in
+practice (a Ministral-8B run named "TalkBox" without flagging it), so this
+is a deterministic Python-side backstop that doesn't depend on that. The
+identity bonus is deliberately excluded here (not just reused from
+`score_effect_relevance`) because a brand mentioned only in passing (e.g. "a
+Heil Sound or MXR talk box" while asking for a talk-box-like vocal sweep)
+would otherwise outscore the actually-relevant effects — confirmed against
+this catalogue, not hypothetical: the word "mxr" alone ranks an unrelated
+MXR Phase 90-style phaser above every wah/envelope-filter effect via
+`score_effect_relevance`'s origin/keyword identity match, while
+`descriptor_relevance` correctly ranks the vocal-character wah/filter
+effects (C-Wah, Toucher, Crier) on top instead. The fallback runs for every
+effect (not only ones the substring check missed entirely) for the same
+reason: `keyword_modules()`'s own aggregation can hit that identical
+false-positive — "mxr" is itself one of MOD's aggregated keywords, from that
+same unrelated phaser's own catalogue entry — so a spurious substring match
+on one module must not prevent the fallback's actually-correct module from
+also being offered. This only ever adds a *module* to the offered set, never
+resolves a specific fxid; `_resolve_missing_fxid`/`_keep_best_per_module`
+still do that once the module is on offer, exactly as for any other effect.
+
 A model can still legitimately want several roles from the same shared slot
 in one plan (a wah, an octave texture, and a solo boost are all genuinely
 useful for different moments of the same tone, even though only one can
@@ -233,6 +316,33 @@ English needles mapped to specific model names, so a genuinely apt
 suggestion (a wah-flavored purpose landing on `C-Wah` vs. a touch/envelope
 one landing on `Toucher`) is found from real catalogue data instead of
 requiring a Python-side edit every time a new phrasing or model appears.
+`_resolve_missing_fxid` deliberately excludes AMP/CAB/NR (`if module not in
+{"PRE", "DST", "EQ", "MOD", "DLY", "RVB"}: return None`) — those have their
+own dedicated, request-level pickers (`_best_amp`/`_matching_cab`, with
+amp/cab family-pairing) on the *normal* path, so fuzzy per-block scoring
+here would bypass that. But during salvage there is no per-block
+`_best_amp`/`_matching_cab` call, so an AMP/CAB/NR block the model named
+correctly (a real catalogue name) but left without an `fxid` had no recovery
+path at all — silently dropped, discarding a choice that was often already
+right. `_resolve_by_exact_name` (also wired into `_salvage_valid_blocks`,
+after `_resolve_missing_fxid`) is a deterministic, module-agnostic backstop
+for exactly that: an exact (case-insensitive) match between the block's own
+`name` and a real catalogue entry's `name` *in the stated module*, deliberately
+not fuzzy-scored — a real catalogue name from the model is either right or a
+coincidence, and fuzzy-matching AMP/CAB here would lose `_matching_cab`'s
+family-pairing benefit. Confirmed as a real, not hypothetical, failure mode:
+`gemma-4-12B-it-4bit`, on `build_rig`'s large prompt/schema, returned
+`{"module": "AMP", "name": "UK 800", "type": "Drive"}` for a `signal_chain`
+item — the catalogue legend's own `{"id","name","type","origin","profile"}`
+reference-entry shape (visible earlier in the same prompt), not the
+requested block shape, and with no `fxid` at all — despite a 200 response
+from `mlx_lm.server`'s `response_format`-constrained decoding, meaning
+structured-output enforcement isn't fully reliable on a schema this large
+for that model. `SYSTEM` now explicitly spells out both shapes and tells the
+model to copy the catalogue entry's `id` into its own block's `fxid` field,
+as defense-in-depth alongside the schema constraint itself — but
+`_resolve_by_exact_name` is what actually recovers the preset when a model
+still gets this wrong.
 
 `_relevant_modules` always
 offers RVB alongside AMP/CAB (not gated on the interpreted intent naming
@@ -255,6 +365,39 @@ intrusive model — when nothing scores. The added block then goes through
 same conservative Mix/Decay ceiling; a distinct `effect_review` note marks
 it as an unrequested default so the UI can tell a user it was added and can
 be removed.
+
+`_review_effect_sympathy`'s `conservative()` helper's `default` argument
+only ever applies when a parameter is *missing* from `block["parameters"]`
+— which `validate_rig` already prevents, by back-filling every parameter
+from the catalogue's own documented default before this ever runs (see
+`validate_rig`'s own comment). So in the common case (the model, or
+`_ensure_reverb`'s default-added block, never touched that parameter at
+all) `maximum` is the *only* thing that actually constrains it — a real,
+confirmed bug when a call passed a looser `maximum` than the catalogue's own
+default: RVB's own catalogue `Decay` default is 50 and the ceiling here used
+to be 55, so a default touch-of-reverb's `Decay` silently passed through at
+50 every time, well short of the "kept subtle" claim in the UI, while `Mix`
+(default 30, ceiling 28) correctly got pulled down — the same gap existed
+for DLY's `Time` (catalogue default 500ms under a 650ms ceiling) and, less
+obviously, `Feedback` — the one DLY model using that literal key ("Analog";
+every other model uses "F.Back") has a catalogue default of 50, above the
+old flat-45 ceiling. Every `conservative()` call's `maximum` must equal the
+actually-intended conservative value, not a separate, looser backstop above
+it. `_manage_gain`'s `set_safe` has the identical shape (its `value`
+argument is equally dead in the common case) and had the same class of bug,
+audited catalogue-wide and fixed the same way: `DST`'s own `Gain` default is
+>=40 on every model and `Fuzz` is 50 on both fuzz models, both above the old
+35/40 ceilings, so "the pedal tightens, the amp saturates" never actually
+held — drive landed at the loose ceiling instead of the intended 28/32
+tightener value on every single DST model. Worst case was `NR`'s `Gate`
+model: catalogue `THRE` default 50, old ceiling 45 (never engaged), more
+than double the intended 20 — directly contradicting that block's own
+"without choking sustained notes" purpose text, for a gate the model already
+proposed itself (the separate newly-inserted-gate path already explicitly
+set `THRE: 20` in its own parameters and was never affected). Checked but
+left alone, no live gap: `AMP`/`DST`'s own `VOL` ceiling (55) is technically
+looser than its intended value (50) too, but every model's catalogue `VOL`
+default already equals 50 exactly, so nothing actually slips through.
 
 The GP-50's `order` binary record is the **DSP signal-chain order**
 (`order[chain_position] = module_id`), not footswitch assignment — an
@@ -286,6 +429,19 @@ record while every other one (factory or user-built) matches blank's
 default exactly, so it looks like a one-off tied to that specific preset,
 not a general rule.
 
+FS1=PRE/FS2=DST is the hardware-confirmed part; `FOOTSWITCH_ASSIGNMENTS`
+also has a fallback tier that is deliberately *not* hardware evidence, just
+this module's own software policy — the firmware has no opinion on which
+block index goes in a mask, any is equally valid at the binary level, so
+where a fallback should point is a musical/UX choice, not something to
+confirm from a `.prst` export. When a generated rig has no PRE, FS1 falls
+back to MOD (chorus/flanger/phaser/tremolo/vibrato); with no DST, FS2 falls
+back to DLY — both are, like PRE/DST, effect types commonly footswitched on
+a real pedalboard for the same reason (a "kick in the texture/delay for
+this section" toggle), so a rig that would otherwise leave a footswitch
+bound to nothing gets a sensible one instead. Only ever a fallback: PRE
+still wins FS1 and DST still wins FS2 whenever present.
+
 `gp50/validator.py`'s `validate_rig()` is the hard boundary between "LLM
 output" and "trusted rig": every fxid/module/parameter name/range/step/
 toggle is checked, and — importantly — **any parameter the plan didn't set is
@@ -305,6 +461,22 @@ on the GP-50 itself but blank in Valeton Suite's preset list, and
 re-exporting that same file from Suite's own save path silently truncated
 it to 10 characters — Suite's real limit is shorter than the hardware's.
 See `docs/GP50_PRST_FORMAT.md`'s Name field note for the full evidence.
+
+`build_rig`'s main loop, `_salvage_valid_blocks`, and `_builtin_fallback` all
+run `_safe_preset_name`, but only the main loop used to pass it the model's
+own `preset_name` with no further fallback — `_salvage_valid_blocks`/
+`_builtin_fallback` both already fell back to the user's own query text
+first. So a plan that validated fine on the first/second attempt (no salvage
+needed at all) but simply had `preset_name` blank/missing landed straight on
+`_safe_preset_name`'s bare hardcoded `"GP-50 Tone"` default — a real, not
+hypothetical, regression: `RIG_SCHEMA` marks `preset_name` required, but
+structured-output enforcement isn't fully reliable for every local
+model/schema-size combination (see the catalogue-legend-shape confusion
+above), so a model can validate a schema-compliant `signal_chain` while
+still leaving `preset_name` empty. The main loop now falls back to
+`payload.get("query")` first too, matching the other two paths, so every
+generated preset gets a real name derived from the actual request instead of
+the same generic default regardless of what was asked for.
 
 `gp50/preset.py` edits a real 552-byte blank GP-50 export
 (`data/blank_gp50.prst`, must be supplied — never synthesized) by locating

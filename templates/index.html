@@ -20,6 +20,11 @@
       Describe the tone you want. We will recommend a complete preset using the
       GP-50&rsquo;s built-in amps and cabs, with optional TONE3000 NAM captures to try.
     </p>
+    {% if lm_model_name %}
+    <p class="meta">Local LLM: {{ lm_model_name }} ({{ lm_base }})</p>
+    {% else %}
+    <p class="meta">Local LLM: not detected at {{ lm_base }} &mdash; start your local LLM server, then reload.</p>
+    {% endif %}
   </header>
 
   <main id="main">

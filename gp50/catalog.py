@@ -47,31 +47,15 @@ def _phrase_hits(phrases: list[str], terms: set[str]) -> tuple[int, int]:
     return full, partial
 
 
-def score_effect_relevance(
-    effect: dict[str, Any], terms: set[str], type_profile: dict[str, Any] | None = None,
-    target_tone: dict[str, float] | None = None,
-) -> float:
-    """How relevant this catalogue entry is to a user's free-text intent.
-
-    `terms` is a lowercased word set (see `tokenize`). Weighted so an exact
-    origin/model/name match dominates, roles/keywords/character/best_for
-    contribute in decreasing order, and generic descriptive words contribute
-    only a little — deliberately not "concatenate everything and count
-    substrings equally". Deterministic and dependency-free: no embeddings.
-    """
-    if not terms and not target_tone:
-        return 0.0
+def _descriptor_score(effect: dict[str, Any], terms: set[str], type_profile: dict[str, Any] | None = None) -> float:
+    """The musical-character component of relevance scoring: roles,
+    keywords, character, best_for, and the generic description — everything
+    except an effect's own identity (name/origin/type). Split out from
+    `score_effect_relevance` so `descriptor_relevance` can use just this part
+    (see its own docstring for why: matching a brand mentioned only as an
+    aside can otherwise outscore an effect that's actually musically
+    similar)."""
     score = 0.0
-    name_words = tokenize(effect.get("name", ""))
-    type_words = tokenize(effect.get("type", ""))
-    origin_words = tokenize(effect.get("origin", ""))
-
-    # Exact origin/model or name match: very high.
-    score += 6 * len(name_words & terms)
-    score += 5 * len(origin_words & terms)
-    # Type match: high.
-    score += 4 * len(type_words & terms)
-
     profile = dict(type_profile or {})
     for key, value in (effect.get("musical_profile") or {}).items():
         if key in ("keywords", "character", "best_for", "watch_out") and isinstance(value, list) and isinstance(profile.get(key), list):
@@ -98,6 +82,35 @@ def score_effect_relevance(
 
     description_words = tokenize(profile.get("what_it_does", ""))
     score += 0.5 * len(description_words & terms)
+    return score
+
+
+def score_effect_relevance(
+    effect: dict[str, Any], terms: set[str], type_profile: dict[str, Any] | None = None,
+    target_tone: dict[str, float] | None = None,
+) -> float:
+    """How relevant this catalogue entry is to a user's free-text intent.
+
+    `terms` is a lowercased word set (see `tokenize`). Weighted so an exact
+    origin/model/name match dominates, roles/keywords/character/best_for
+    contribute in decreasing order, and generic descriptive words contribute
+    only a little — deliberately not "concatenate everything and count
+    substrings equally". Deterministic and dependency-free: no embeddings.
+    """
+    if not terms and not target_tone:
+        return 0.0
+    score = 0.0
+    name_words = tokenize(effect.get("name", ""))
+    type_words = tokenize(effect.get("type", ""))
+    origin_words = tokenize(effect.get("origin", ""))
+
+    # Exact origin/model or name match: very high.
+    score += 6 * len(name_words & terms)
+    score += 5 * len(origin_words & terms)
+    # Type match: high.
+    score += 4 * len(type_words & terms)
+
+    score += _descriptor_score(effect, terms, type_profile)
 
     if target_tone:
         tone = effect.get("tone") or {}
@@ -107,6 +120,28 @@ def score_effect_relevance(
             score += 3 * (1 - distance)
 
     return score
+
+
+def descriptor_relevance(effect: dict[str, Any], terms: set[str], type_profile: dict[str, Any] | None = None) -> float:
+    """How well this catalogue entry's *musical character* — not its literal
+    name/brand/origin — matches free-text terms.
+
+    This is `score_effect_relevance` without the identity bonus (name/origin/
+    type exact-match), for the one case where that bonus is actively wrong:
+    matching a genre-level or descriptive concept the request never named a
+    real device for, when the request text happens to also mention an
+    unrelated brand in passing (e.g. "a Heil Sound or MXR talk box" while
+    asking for a talk-box-like vocal sweep). `score_effect_relevance`'s
+    identity bonus would then score a completely unrelated same-brand
+    catalogue effect (an MXR Phase 90-style phaser) far higher than the
+    actually similar effects, purely from the brand word matching that
+    other effect's `origin`/`keywords` — confirmed against this catalogue,
+    not hypothetical: see `gp50.rig_builder._fallback_module_for_effect`,
+    the caller this exists for.
+    """
+    if not terms:
+        return 0.0
+    return _descriptor_score(effect, terms, type_profile)
 
 
 def canonical_module(module: str) -> str:
@@ -169,6 +204,46 @@ class GP50Catalog:
             if canonical_module(candidate) == wanted and effects:
                 return int(effects[0]["module_id"])
         raise KeyError(f"Unknown GP-50 module: {module!r}")
+
+    def has_device_named(self, text: str) -> bool:
+        """Whether free text names a real device this catalogue already
+        models — a strict *majority* of `text`'s own words overlapping with
+        some effect's own `name`/`origin`. The same identity-style match
+        `gp50.rig_builder._apply_reference_settings` already uses to apply a
+        sourced setting to the right block, reused here for a different
+        purpose: catching `tone_finder.make_search_plan`'s own
+        `hardware_available=false` claim when it's simply wrong.
+
+        That interpretation call has no catalogue access at all (see
+        CLAUDE.md's "Two independent halves") — it's the local model's own
+        generic guess about "a typical multi-effects pedal/modeler", not a
+        fact about this specific catalogue. Confirmed wrong in practice, not
+        hypothetical: a request naming "Dunlop Cry Baby Wah" was still
+        marked unavailable despite the prompt explicitly saying wah effects
+        are almost always available — while this catalogue's own `C-Wah`
+        entry has `origin` "Dunlop Cry Baby", overlapping on 3 of those 4
+        words. Deliberately identity-only (name/origin), not
+        `score_effect_relevance`/`descriptor_relevance`'s broader
+        musical-character matching: those answer "what's the closest
+        available substitute", a different question from "does the exact
+        named device already exist here".
+
+        A *majority*, not a bare non-empty intersection, because a single
+        shared word is a real, observed false-positive risk: "Talk Box"
+        (which this catalogue genuinely has no equivalent for) shares the
+        word "box" with an entirely unrelated pedal (`La Charger`, origin
+        "MI Audio Crunch Box") — 1 of 2 words, correctly rejected, versus
+        "Dunlop Cry Baby Wah"'s 3 of 4.
+        """
+        terms = tokenize(text)
+        if not terms:
+            return False
+        for effects in self.data.get("modules", {}).values():
+            for effect in effects:
+                identity = tokenize(f"{effect.get('name', '')} {effect.get('origin', '')}")
+                if identity and len(identity & terms) * 2 > len(terms):
+                    return True
+        return False
 
     def type_profile(self, effect_type: str) -> dict[str, Any]:
         """Generic musical description shared by every model of this type."""

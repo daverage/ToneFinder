@@ -82,14 +82,28 @@ class PresetError(ValueError): pass
 # enabled/on)`. Fully derivable from the bypass mask and the fs1/fs2 masks
 # above, so this module computes and writes it rather than copying the
 # template's stale value.
-FOOTSWITCH_ASSIGNMENTS = {"fs1": "PRE", "fs2": "DST"}
+#
+# fs1=PRE/fs2=DST itself is the hardware-confirmed default (see above); the
+# second entry in each tuple is this module's own software policy, not
+# something read off real hardware — the firmware has no opinion on which
+# block index goes in a mask, any of them is equally valid at the binary
+# level. When a generated rig has no PRE at all, MOD (chorus/flanger/phaser/
+# tremolo/vibrato) is the next most commonly footswitched effect type on a
+# real pedalboard (a "kick in the texture change" toggle, the same role a
+# PRE boost/wah plays); when there's no DST, DLY fills the equivalent role
+# for "kick in the delay for a section" — so a rig that would otherwise
+# leave a footswitch pointing at nothing gets a musically sensible one
+# instead. Only ever a fallback: PRE still wins fs1 over MOD, DST still
+# wins fs2 over DLY, whenever the primary is actually present.
+FOOTSWITCH_ASSIGNMENTS = {"fs1": ("PRE", "MOD"), "fs2": ("DST", "DLY")}
 _FOOTSWITCH_LED_BASELINE = 5
 
 
 def _assign_footswitches(data: bytearray, offset: int, rig: dict[str, Any], catalog: GP50Catalog, enabled_mask: int) -> None:
     present = {canonical_module(block["module"]) for block in rig["signal_chain"]}
-    for i, module in enumerate(FOOTSWITCH_ASSIGNMENTS.values()):
-        if module in present:
+    for i, candidates in enumerate(FOOTSWITCH_ASSIGNMENTS.values()):
+        module = next((candidate for candidate in candidates if candidate in present), None)
+        if module is not None:
             struct.pack_into("<I", data, offset + i * 4, 1 << catalog.module_id(module))
         # Recompute the LED byte from whatever mask ends up in the file
         # (ours, or the template's preserved one if we left it alone), not

@@ -1,7 +1,16 @@
 import unittest
 
 from gp50.catalog import GP50Catalog, score_effect_relevance
-from gp50.rig_builder import SYSTEM, _best_amp, _matching_cab, _target_tone_from_intent, build_rig, importance_weight
+from gp50.rig_builder import (
+    SYSTEM,
+    _best_amp,
+    _fallback_module_for_effect,
+    _matching_cab,
+    _relevant_modules,
+    _target_tone_from_intent,
+    build_rig,
+    importance_weight,
+)
 
 
 class RigBuilderTests(unittest.TestCase):
@@ -47,10 +56,94 @@ class RigBuilderTests(unittest.TestCase):
         self.assertIn("not instructions", SYSTEM)
         self.assertIn("web_research_notes", SYSTEM)
 
+    def test_a_validated_first_attempt_still_falls_back_to_the_query_when_preset_name_is_blank(self):
+        # Real observed bug: unlike _salvage_valid_blocks/_builtin_fallback
+        # (both already fall back to the user's own query text), this main
+        # path used to go straight from "model omitted preset_name" to
+        # _safe_preset_name's bare hardcoded "GP-50 Tone" default whenever
+        # the model's plan otherwise validated fine on the first attempt —
+        # so every such preset got the same generic name regardless of the
+        # actual request, rather than needing salvage to ever kick in.
+        catalog = GP50Catalog()
+        amp = catalog.effects_for_modules(["AMP"])["AMP"][0]
+        cab = catalog.effects_for_modules(["CAB"])["CAB"][0]
+
+        def fake_lm(system, user, schema, **kwargs):
+            return {"preset_name": "", "summary": "test", "signal_chain": [
+                {"module": "AMP", "fxid": amp["fxid"], "enabled": True, "purpose": "amp", "parameters": {}},
+                {"module": "CAB", "fxid": cab["fxid"], "enabled": True, "purpose": "cab", "parameters": {}},
+            ]}
+
+        rig = build_rig({"query": "warm bluesy lead"}, fake_lm, catalog)
+        self.assertNotEqual(rig["preset_name"], "GP-50 Tone")
+        self.assertEqual(rig["preset_name"], "warm blues")
+
+    def test_system_prompt_disambiguates_catalogue_legend_shape_from_output_shape(self):
+        # Real observed confusion (gemma-4-12B-it-4bit): with structured
+        # output not fully enforced on this large a schema, the model
+        # returned signal_chain items shaped like the catalogue's own
+        # {"id","name","type","origin","profile"} reference entries instead
+        # of the requested {"module","fxid","enabled","purpose","parameters"}
+        # block shape, and consistently omitted "fxid" entirely. This is a
+        # defense-in-depth prompt fix (gp50.rig_builder._resolve_by_exact_name
+        # is the deterministic backstop for when it still happens).
+        self.assertIn('"id", "name", "type", "origin", "profile"', SYSTEM)
+        self.assertIn('"module", "fxid", "enabled", "purpose", "parameters"', SYSTEM)
+        self.assertIn("never omit", SYSTEM.lower())
+
     def test_importance_weight_maps_tiers_and_defaults_unknown_to_supporting(self):
         self.assertEqual(importance_weight("essential"), 1.0)
         self.assertEqual(importance_weight("optional"), 0.25)
         self.assertEqual(importance_weight("not-a-tier"), 0.5)
+
+    def test_relevant_modules_finds_pre_for_a_talk_box_request_via_descriptor_fallback(self):
+        # Real observed failure: a local model named the effect "TalkBox"
+        # with no wah/filter/envelope keyword anywhere in its text, and
+        # didn't flag hardware_available=false either (tone_finder.py's
+        # mechanism for that is LLM-dependent and doesn't always fire) — so
+        # PRE was never offered in build_rig's schema and the built preset
+        # silently had no PRE block at all despite the user explicitly
+        # asking for a wah-like effect. _fallback_module_for_effect (via
+        # descriptor_relevance) is the deterministic backstop for exactly
+        # this: it must find PRE (C-Wah/Toucher/Crier, all vocal-character
+        # PRE effects) from the effect's own text alone.
+        catalog = GP50Catalog()
+        payload = {"intent": {"gain": "high", "effects": [
+            {"name": "TalkBox", "purpose": "Achieve iconic vocal-like guitar sound", "starting_point": "Heil Sound or MXR"},
+            {"name": "Overdrive", "purpose": "Warm, singing lead tone drive", "starting_point": "Boss OD-1"},
+        ]}}
+        modules = _relevant_modules(payload, catalog)
+        self.assertIn("PRE", modules)
+
+    def test_relevant_modules_offers_the_fallback_module_even_when_something_else_already_matched(self):
+        # The same request's starting_point text ("Heil Sound or MXR") also
+        # substring-matches MOD via "mxr" (an unrelated MXR Phase 90-style
+        # phaser's own catalogue keyword) — a real false positive in the
+        # coarse per-module keyword aggregation, confirmed against this
+        # catalogue. That spurious match must not crowd out the fallback's
+        # correct PRE answer: both should end up offered.
+        catalog = GP50Catalog()
+        payload = {"intent": {"effects": [
+            {"name": "TalkBox", "purpose": "Achieve iconic vocal-like guitar sound", "starting_point": "Heil Sound or MXR"},
+        ]}}
+        modules = _relevant_modules(payload, catalog)
+        self.assertIn("MOD", modules)  # the spurious "mxr" substring match, unavoidable at this layer
+        self.assertIn("PRE", modules)  # the fallback's actually-correct answer, still present alongside it
+
+    def test_relevant_modules_stays_unpolluted_for_an_ordinary_well_matched_request(self):
+        # The fallback runs for every effect, not just unmatched ones (see
+        # _relevant_modules' docstring) — make sure that doesn't add noise
+        # to a request that already matches cleanly.
+        catalog = GP50Catalog()
+        payload = {"intent": {"effects": [
+            {"name": "Delay", "purpose": "short slapback echo", "starting_point": "Mix 15%"},
+        ]}}
+        self.assertEqual(_relevant_modules(payload, catalog), ["AMP", "CAB", "RVB", "DLY"])
+
+    def test_fallback_module_for_effect_returns_none_for_generic_text(self):
+        catalog = GP50Catalog()
+        self.assertIsNone(_fallback_module_for_effect("a nice sound for the song", catalog))
+        self.assertIsNone(_fallback_module_for_effect("", catalog))
 
     def test_prompt_tells_the_model_which_modules_share_one_slot(self):
         # A request whose intent names two PRE-flavored effects (compressor
@@ -201,8 +294,81 @@ class RigBuilderTests(unittest.TestCase):
         rig = build_rig({"query": "high gain", "intent": {"gain": "high"}}, fake_lm, catalog)
         blocks = {block["module"]: block for block in rig["signal_chain"]}
         self.assertLessEqual(blocks["AMP"]["parameters"]["Gain"], 55)
-        self.assertLessEqual(blocks["DST"]["parameters"]["Gain"], 35)
+        # 28, not the old 35: the ceiling must equal the intended "tightener,
+        # not saturator" value directly (see test_drive_gain_and_fuzz_land_
+        # on_the_intended_tightener_value_not_a_looser_ceiling below, which
+        # reproduces the exact regression this fixed).
+        self.assertLessEqual(blocks["DST"]["parameters"]["Gain"], 28)
         self.assertEqual(blocks["NR"]["parameters"]["THRE"], 20)
+
+    def test_drive_gain_and_fuzz_land_on_the_intended_tightener_value_not_a_looser_ceiling(self):
+        # Real observed bug, the same class as RVB Decay/DLY Time/Feedback:
+        # every DST model's own catalogue Gain default is >=40 and every Fuzz
+        # default is 50 -- both above the old 35/40 ceilings (so validate_rig's
+        # catalogue-default back-fill always slipped through unreduced to the
+        # ceiling, not down to the intended 28/32 "tightener" value).
+        catalog = GP50Catalog()
+        amp = next(e for e in catalog.effects_for_modules(["AMP"])["AMP"] if e["name"] == "UK 800")
+        cab = catalog.effects_for_modules(["CAB"])["CAB"][0]
+        fuzz = next(e for e in catalog.effects_for_modules(["DST"])["DST"] if e["name"] == "Red Haze")
+
+        def fake_lm(system, user, schema, **kwargs):
+            return {"preset_name": "Fuzz Test", "summary": "test", "signal_chain": [
+                {"module": "AMP", "fxid": amp["fxid"], "enabled": True, "purpose": "amp", "parameters": {}},
+                {"module": "CAB", "fxid": cab["fxid"], "enabled": True, "purpose": "cab", "parameters": {}},
+                {"module": "DST", "fxid": fuzz["fxid"], "enabled": True, "purpose": "fuzz", "parameters": {}},
+            ]}
+
+        rig = build_rig({"query": "high gain fuzz", "intent": {"gain": "high"}}, fake_lm, catalog)
+        dst = next(b for b in rig["signal_chain"] if b["module"] == "DST")
+        self.assertEqual(dst["parameters"]["Fuzz"], 32.0)
+
+    def test_a_pre_existing_gate_with_unset_threshold_is_still_pulled_down_to_20(self):
+        # Distinct from test_high_gain_plan_is_capped_and_gets_a_noise_gate:
+        # that test has no NR block at all, so _manage_gain inserts a fresh
+        # one with THRE explicitly set to 20 already -- always correct, even
+        # before this fix. This reproduces the actual regression: the model
+        # already proposed an NR/Gate block itself, leaving THRE unset (so
+        # validate_rig back-fills the catalogue's own default, 50) -- the old
+        # 45 ceiling let that slip through at 45, more than double the
+        # intended 20 and directly against this block's own "without
+        # choking sustained notes" purpose.
+        catalog = GP50Catalog()
+        amp = next(e for e in catalog.effects_for_modules(["AMP"])["AMP"] if e["name"] == "UK 800")
+        cab = catalog.effects_for_modules(["CAB"])["CAB"][0]
+        gate = next(e for e in catalog.effects_for_modules(["NR"])["NR"] if e["type"] == "Gate")
+
+        def fake_lm(system, user, schema, **kwargs):
+            return {"preset_name": "Gate Test", "summary": "test", "signal_chain": [
+                {"module": "AMP", "fxid": amp["fxid"], "enabled": True, "purpose": "amp", "parameters": {}},
+                {"module": "CAB", "fxid": cab["fxid"], "enabled": True, "purpose": "cab", "parameters": {}},
+                {"module": "NR", "fxid": gate["fxid"], "enabled": True, "purpose": "gate", "parameters": {}},
+            ]}
+
+        rig = build_rig({"query": "high gain", "intent": {"gain": "high"}}, fake_lm, catalog)
+        nr = next(b for b in rig["signal_chain"] if b["module"] == "NR")
+        self.assertEqual(nr["parameters"]["THRE"], 20.0)
+
+    def test_analog_delay_feedback_lands_on_the_intended_value_not_a_looser_ceiling(self):
+        # "Analog" is the one DLY model using the literal "Feedback" key
+        # (every other model uses "F.Back") -- its catalogue default is 50,
+        # above the old flat 45 ceiling (which also didn't distinguish
+        # long/short requests the way the intended default already did).
+        catalog = GP50Catalog()
+        amp = catalog.effects_for_modules(["AMP"])["AMP"][0]
+        cab = catalog.effects_for_modules(["CAB"])["CAB"][0]
+        analog = next(e for e in catalog.effects_for_modules(["DLY"])["DLY"] if e["name"] == "Analog")
+
+        def fake_lm(system, user, schema, **kwargs):
+            return {"preset_name": "Analog DLY", "summary": "test", "signal_chain": [
+                {"module": "AMP", "fxid": amp["fxid"], "enabled": True, "purpose": "amp", "parameters": {}},
+                {"module": "CAB", "fxid": cab["fxid"], "enabled": True, "purpose": "cab", "parameters": {}},
+                {"module": "DLY", "fxid": analog["fxid"], "enabled": True, "purpose": "delay", "parameters": {}},
+            ]}
+
+        rig = build_rig({"query": "short slapback delay", "intent": {"effects": [{"name": "Delay", "purpose": "short slapback"}]}}, fake_lm, catalog)
+        dly = next(b for b in rig["signal_chain"] if b["module"] == "DLY")
+        self.assertEqual(dly["parameters"]["Feedback"], 22.0)
 
     def test_delay_and_reverb_are_given_conservative_starting_settings(self):
         catalog = GP50Catalog()
@@ -226,8 +392,39 @@ class RigBuilderTests(unittest.TestCase):
         feedback = blocks["DLY"]["parameters"].get("F.Back", blocks["DLY"]["parameters"].get("Feedback"))
         self.assertLessEqual(feedback, 45)
         self.assertLessEqual(blocks["RVB"]["parameters"]["Mix"], 28)
-        self.assertLessEqual(blocks["RVB"]["parameters"]["Decay"], 55)
+        # 42, not the old 55: the ceiling must actually equal the intended
+        # conservative value, since validate_rig always back-fills a missing
+        # parameter from the catalogue's own default first — a looser
+        # ceiling above that default (55 vs. RVB's own 50) never engages at
+        # all (see test_default_touch_of_reverb_pulls_decay_below_the_
+        # catalogue_default below, which reproduces that exact regression).
+        self.assertLessEqual(blocks["RVB"]["parameters"]["Decay"], 42)
+        self.assertLessEqual(blocks["DLY"]["parameters"]["Time"], 420)
         self.assertTrue(rig["effect_review"])
+
+    def test_default_touch_of_reverb_pulls_decay_below_the_catalogue_default(self):
+        # Real observed bug: RVB's own catalogue Decay default is 50, and the
+        # old ceiling here was 55 -- so an untouched Decay silently passed
+        # through at 50 on every default-touch-of-reverb rig (the common
+        # case: the model didn't ask for reverb at all, _ensure_reverb added
+        # one), well short of the "kept subtle" claim in the UI. Decay must
+        # actually be pulled down, the same way Mix already reliably is.
+        catalog = GP50Catalog()
+        amp = catalog.effects_for_modules(["AMP"])["AMP"][0]
+        cab = catalog.effects_for_modules(["CAB"])["CAB"][0]
+
+        def fake_lm(system, user, schema, **kwargs):
+            return {"preset_name": "NoRVB", "summary": "test", "signal_chain": [
+                {"module": "AMP", "fxid": amp["fxid"], "enabled": True, "purpose": "amp", "parameters": {}},
+                {"module": "CAB", "fxid": cab["fxid"], "enabled": True, "purpose": "cab", "parameters": {}},
+            ]}
+
+        rig = build_rig({"query": "clean tone"}, fake_lm, catalog)
+        rvb = next(b for b in rig["signal_chain"] if b["module"] == "RVB")
+        catalogue_default = next(p["default"] for p in catalog.get(rvb["fxid"])["params"] if p["name"] == "Decay")
+        self.assertEqual(catalogue_default, 50.0)
+        self.assertLess(rvb["parameters"]["Decay"], catalogue_default)
+        self.assertLessEqual(rvb["parameters"]["Decay"], 30)
 
     def test_reference_settings_are_applied_to_the_matching_amp_only(self):
         catalog = GP50Catalog()

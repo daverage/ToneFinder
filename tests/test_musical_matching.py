@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from gp50.catalog import GP50Catalog, score_effect_relevance, tokenize
+from gp50.catalog import GP50Catalog, descriptor_relevance, score_effect_relevance, tokenize
 
 
 class MusicalMatchingTests(unittest.TestCase):
@@ -83,6 +83,52 @@ class MusicalMatchingTests(unittest.TestCase):
         self.assertEqual(set(shared["MOD"]), {"Chorus", "Flanger", "Phaser", "Tremolo", "Vibrato"})
         for homogeneous in ("NR", "EQ", "DLY", "RVB"):
             self.assertNotIn(homogeneous, shared)
+
+    def test_has_device_named_finds_a_real_pedal_by_origin(self):
+        self.assertTrue(self.catalog.has_device_named("Dunlop Cry Baby Wah"))
+
+    def test_has_device_named_rejects_a_single_word_coincidence(self):
+        # "Talk Box" has no catalogue equivalent at all, but shares the word
+        # "box" with an unrelated pedal ("La Charger", origin "MI Audio
+        # Crunch Box") -- a bare intersection would wrongly call this a
+        # match (confirmed: it did, before the majority-overlap fix).
+        self.assertFalse(self.catalog.has_device_named("Talk Box"))
+        self.assertFalse(self.catalog.has_device_named("nonexistent gizmo"))
+        self.assertFalse(self.catalog.has_device_named(""))
+
+    def test_descriptor_relevance_ignores_a_brand_mentioned_only_in_passing(self):
+        # "TalkBox ... vocal-like guitar sound (Heil Sound or MXR)": the
+        # request never asked for an MXR product, but score_effect_relevance
+        # (which rewards an exact origin/keyword identity match) ranks an
+        # unrelated MXR Phase 90-style phaser above the catalogue's actually
+        # vocal-character wah/envelope-filter effects purely on the word
+        # "mxr" — a real false positive this catalogue reproduces, not a
+        # hypothetical. descriptor_relevance (character/keywords/roles only,
+        # no identity bonus) must not make the same mistake.
+        #
+        # tokenize()'s own stopword list doesn't drop "guitar"/"sound" (its
+        # actual caller, gp50.rig_builder._fallback_module_for_effect, strips
+        # those and more via its own _FALLBACK_STOPWORDS first) — stripped
+        # here too, so this test reflects the terms the real caller passes,
+        # not a diluted set that hides the false positive behind generic-word
+        # noise.
+        #
+        # No type_profile is passed below, matching how gp50.rig_builder's
+        # scoring call sites actually call this (e.g.
+        # _fallback_module_for_effect, _resolve_missing_fxid, _best_amp) —
+        # each effect's own musical_profile only, not the merged generic
+        # type-level profile.
+        terms = tokenize("talkbox achieve iconic vocal-like guitar sound heil sound or mxr") - {"guitar", "sound"}
+        o_phase = next(e for e in self.catalog.effects_for_modules(["MOD"])["MOD"] if e["name"] == "O-Phase")
+        c_wah = next(e for e in self.catalog.effects_for_modules(["PRE"])["PRE"] if e["name"] == "C-Wah")
+
+        full_score_o_phase = score_effect_relevance(o_phase, terms)
+        full_score_c_wah = score_effect_relevance(c_wah, terms)
+        self.assertGreater(full_score_o_phase, full_score_c_wah, "sanity check: the false positive is real")
+
+        descriptor_o_phase = descriptor_relevance(o_phase, terms)
+        descriptor_c_wah = descriptor_relevance(c_wah, terms)
+        self.assertGreater(descriptor_c_wah, descriptor_o_phase)
 
 
 if __name__ == "__main__":
