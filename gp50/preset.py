@@ -19,7 +19,8 @@ NAME_OFFSET, NAME_SIZE, BODY_OFFSET = 0x19, 16, 0x29
 # discard the displayed name.
 NAME_TEXT_SIZE = NAME_SIZE - 1
 RECORDS = {"models": bytes.fromhex("03302800"), "bypass": bytes.fromhex("01300400"),
-           "order": bytes.fromhex("02300A00"), "params": bytes.fromhex("04304001")}
+           "order": bytes.fromhex("02300A00"), "params": bytes.fromhex("04304001"),
+           "footswitches": bytes.fromhex("03000A00")}
 
 
 class PresetError(ValueError): pass
@@ -41,17 +42,36 @@ class PresetError(ValueError): pass
 # now does) gives every generated preset a correct, standard signal order
 # for free, with no risk of writing a value real hardware would reject.
 #
-# This module previously computed a "footswitch" reassignment here by
-# swapping module_ids into position 0/1 for whichever pedal was enabled —
-# based on a single earlier example that, per the confirmed spec above, was
-# actually just a chain reorder that happened to look plausible as
-# footswitch binding. That swap logic is removed rather than repurposed for
-# chain reordering: rig_builder has no per-request signal about a desired
-# non-default chain order to act on, and the default is already correct, so
-# there's nothing to compute. Real footswitch binding (which physical
-# switch toggles which block) is apparently stored elsewhere (see
-# docs/GP50_PRST_FORMAT.md's open-questions section) and this module does
-# not attempt to write it.
+# This module previously computed a "footswitch" reassignment onto the
+# `order` bytes by swapping module_ids into position 0/1 for whichever
+# pedal was enabled — based on a single earlier example that, per the
+# confirmed spec above, was actually just a chain reorder that happened to
+# look plausible as footswitch binding. That was removed rather than
+# repurposed: `order` has nothing to do with footswitches.
+#
+# Real footswitch binding lives in a separate trailer record (magic
+# `03 00 0A 00`): [fs1 u32 mask][fs2 u32 mask][2 trailing bytes, unknown —
+# left untouched]. Each mask's bit `k` (block index, see catalog.module_id)
+# means that footswitch toggles block `k`'s bypass state; docs/
+# GP50_PRST_FORMAT.md records real examples with 0-2 bits set. Confirmed
+# against two real Suite exports of the same preset with FS2 physically
+# pressed on the real device between them (user-confirmed, not inferred):
+# both have fs1=PRE, fs2=DST, byte-identical whether DST's *bypass* bit is
+# on or off — i.e. the assignment is independent of the block's current
+# on/off state, exactly like a real pedalboard footswitch binding should
+# be. This module assigns FS1/FS2 to whichever of PRE/DST is present in
+# the generated rig (regardless of its enabled/bypass state) so the two
+# most commonly footswitched effect types are live-toggleable on the real
+# unit; a slot with no matching block keeps whatever the template already
+# has there.
+FOOTSWITCH_ASSIGNMENTS = {"fs1": "PRE", "fs2": "DST"}
+
+
+def _assign_footswitches(data: bytearray, offset: int, rig: dict[str, Any], catalog: GP50Catalog) -> None:
+    present = {canonical_module(block["module"]) for block in rig["signal_chain"]}
+    for i, module in enumerate(FOOTSWITCH_ASSIGNMENTS.values()):
+        if module in present:
+            struct.pack_into("<I", data, offset + i * 4, 1 << catalog.module_id(module))
 
 
 def crc8_07(data: bytes) -> int:
@@ -81,6 +101,7 @@ def create_preset(plan: dict[str, Any], template: str | Path | None = None, cata
     bypass = _record_offset(data, RECORDS["bypass"], 4)
     order = _record_offset(data, RECORDS["order"], 10)
     params = _record_offset(data, RECORDS["params"], 320)
+    footswitches = _record_offset(data, RECORDS["footswitches"], 10)
     if sorted(data[order:order + 10]) != list(range(10)):
         raise PresetError("Blank preset has an invalid GP-50 chain-order record")
     encoded_name = rig["preset_name"].encode("latin-1", errors="replace")[:NAME_TEXT_SIZE]
@@ -101,9 +122,10 @@ def create_preset(plan: dict[str, Any], template: str | Path | None = None, cata
                 struct.pack_into("<f", data, params + 4 * (block_index * 8 + parameter["alg_id"]), block["parameters"][parameter["name"]])
     struct.pack_into("<I", data, bypass, enabled_mask)
     # The chain-order record is left exactly as the template has it — see
-    # the note above the (removed) footswitch-assignment code this module
-    # used to write here. The template's default order is already a
-    # correct, conventional signal chain, and there is no per-request
-    # signal to justify writing a different one.
+    # the note above the `order` variable's original footswitch-assignment
+    # code (removed): the template's default order is already a correct,
+    # conventional signal chain, and there is no per-request signal to
+    # justify writing a different one.
+    _assign_footswitches(data, footswitches, rig, catalog)
     data[0x14] = crc8_07(bytes(data[0x15:]))
     return bytes(data)

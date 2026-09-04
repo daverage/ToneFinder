@@ -141,8 +141,17 @@ hardware-read example in that project, which is unresolved). `preset.py`'s
 it: the blank template's default order already places movable blocks
 (NR/PRE/MOD/DLY/RVB) in the conventional pedalboard arrangement around the
 fixed DST/N->S/AMP/CAB/EQ core, and there's no per-request signal to justify
-writing a different one. Real footswitch binding is apparently stored
-elsewhere in the file and this codebase does not attempt to write it.
+writing a different one.
+
+Real footswitch binding is a separate record — magic `03 00 0A 00`,
+`[FS1 u32][FS2 u32]` block-index bitmasks — confirmed against a real
+hardware pair (`data/66-Mick Ronso (DST on/off).prst`: FS2 physically
+toggled DST on the real unit; the mask matches exactly, independent of
+DST's own bypass state). `preset.py`'s `_assign_footswitches()` writes it:
+FS1→PRE, FS2→DST whenever that block type is present in the generated rig.
+See `docs/GP50_PRST_FORMAT.md` §7 for the full write-up; §9 covers what's
+still open (why the order record's earlier real example isn't a valid
+permutation, and the two trailing bytes on this same footswitch record).
 
 `gp50/validator.py`'s `validate_rig()` is the hard boundary between "LLM
 output" and "trusted rig": every fxid/module/parameter name/range/step/
