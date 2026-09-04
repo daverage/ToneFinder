@@ -2,6 +2,8 @@
 
 Local AI-assisted search for TONE3000 A2 NAM captures, followed by a
 catalogue-validated GP-50 rig proposal and template-preserving `.prst` export.
+See [`docs/VISION.md`](docs/VISION.md) for what this project is trying to do
+and the principles behind how it's built.
 
 ## What it does
 

@@ -138,5 +138,4 @@ def validate_rig(plan: dict[str, Any], catalog: GP50Catalog | None = None) -> di
                        "effect_name": effect["name"], "origin": effect.get("origin", "")})
     if errors:
         raise RigValidationError(errors)
-    return {"preset_name": name, "summary": str(plan.get("summary") or plan.get("reasoning_summary") or "").strip(),
-            "snaptone_slot": plan.get("snaptone_slot"), "signal_chain": output}
+    return {"preset_name": name, "summary": str(plan.get("summary") or "").strip(), "signal_chain": output}

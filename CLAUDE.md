@@ -54,11 +54,12 @@ remove either guard even though the other would still work.
 
 ### `gp50/` — hardware AND musical knowledge authority
 
-`gp50_catalog.json` (repo root, generator in `gp50_catalog_builder/` — that
-subpackage's own `gp50_catalog.py`/README describe an older standalone
-design and are **not** what the app actually uses; the live implementation is
-`gp50/catalog.py`) is the single source of truth for both hardware facts and
-musical/semantic knowledge:
+`gp50_catalog.json` (repo root) is the single source of truth for both
+hardware facts and musical/semantic knowledge, read by `gp50/catalog.py`.
+There is no in-repo generator for it anymore — an earlier standalone
+`gp50_catalog_builder/` subpackage produced an older, hardware-facts-only
+schema (no `musical_profile`/`tone`/`knowledge`) and was removed; treat
+`gp50_catalog.json` as hand-maintained data, not build output:
 
 - Hardware: `fxid`, `fxid_hex`, `module`, `module_id`, `name`, `title`,
   `type`, `origin`, and each `params[]` entry's `alg_id`/`min`/`max`/`step`/
