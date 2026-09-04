@@ -42,6 +42,73 @@ There is no lint/build/typecheck config in this repo — don't invent one.
   as the trusted core; `tone_finder.py`/`app.py` are the untrusted-input
   boundary around it.
 
+### Request mode classification and evidence-gated effect inclusion
+
+`tone_finder.make_search_plan` (the interpretation call behind `/api/search`
+and, via its `intent` output, `/api/build-rig`) classifies every request into
+one `mode` — `song_reconstruction`, `artist_general`, `descriptive_tone`, or
+`hybrid` — and asks for each proposed effect's own `selection_basis`
+(`explicit_user`/`researched`/`semantic`) and, for a researched one,
+`evidence_status` (`confirmed`/`probable`/`possible`/`unsupported`). This
+exists because a single interpretation call previously treated a "recreate
+this exact recording" request and a "give me a warm bluesy tone" request
+identically — an unevidenced guess about a specific recording's pedalboard
+had no less weight than an effect the user typed themselves.
+
+`tone_finder._apply_evidence_policy` runs once, immediately after
+interpretation, and is the only thing that filters `plan["effects"]` — it is
+never re-applied later, and everything downstream
+(`gp50/rig_builder.py`'s `_relevant_modules`/`build_rig`) only ever sees the
+already-filtered list, so an effect this policy rejects never reaches
+catalogue narrowing or the rig-building prompt at all. Its rule, condensed:
+an effect always survives if `selection_basis` is `explicit_user` (the user
+asked for it themselves) or the model flagged it `required`; otherwise
+`song_reconstruction`/`artist_general`/`hybrid` require a `researched` effect
+to be `confirmed`/`probable` (never `possible`/`unsupported` by default), and
+gate `semantic` effects — allowed for broad gap-filling in `artist_general`,
+but in `hybrid` only when the effect's own name/purpose text shares a word
+with something in the model's own `requested_changes` list (an explicit
+sonic change the user asked for beyond the reference tone itself), so a named
+artist/song reference's evidenced core doesn't sprout unrelated semantic
+additions just because the request also asked for one specific change
+elsewhere. `descriptive_tone` is exempt entirely — every proposed effect is
+semantic by construction, so nothing is filtered. Rejected effects are kept
+(with a `reason`) in `plan["rejected_effects"]`, not silently dropped, so
+`static/js/app.js`'s `renderIntent` can show the user what was excluded and
+why instead of a preset that's just quietly thinner than the model's actual
+answer.
+
+`importance` (also asked of every effect) is a categorical tier —
+`essential`/`important`/`supporting`/`optional` — not a 0.0–1.0 float: a
+small local model can reliably distinguish "essential" from "optional" but
+can't produce a meaningful 0.71 vs. 0.64, so asking for that precision would
+just imply confidence the model doesn't have. `gp50/rig_builder.py`'s
+`importance_weight()` is the one place a tier is mapped back to a number
+(`essential`=1.00/`important`=0.75/`supporting`=0.50/`optional`=0.25); it's
+intentionally not yet consumed by anything — it's forward-compatible data for
+a future slot-conflict/critic pass, not wired into today's filtering or into
+`_keep_best_per_module`'s existing tie-breaking.
+
+Both `make_search_plan`/`make_amp_requirements` (`tone_finder.py`) and
+`build_rig` (`gp50/rig_builder.py`) wrap externally-sourced content —
+`web_research()`'s live-fetched web text above all — in explicit
+`<user_request>`/`<verified_research>`/`<data>` tags, with a system-prompt
+sentence telling the model that content inside those tags is data, never
+instructions. `web_research()` fetches live third-party page text (via
+DuckDuckGo), so without this a page containing something like "ignore
+previous instructions" would reach the model with no textual signal that
+it's content to reason *about*, not content to *obey*.
+
+This was scoped deliberately narrow: it does not add per-category (guitar/
+amp/pedals/tuning) targeted web research (`web_research` is still one
+DuckDuckGo call on the raw query), an LLM candidate-judge call, or a separate
+critic pass — those were judged not worth the added local-model latency
+(every additional stage is another full sequential call on a single-threaded
+local LLM, see below) for this pass, and evaluating this filtering step's
+actual effect on rig quality first, before adding more, avoids conflating
+"better interpretation logic" with "more/noisier research input" as the
+explanation for any change in results.
+
 ### Concurrency: exactly one LLM call in flight, ever
 
 A local LLM's memory (unified memory on Apple Silicon) isn't cleanly

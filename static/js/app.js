@@ -202,8 +202,23 @@
       )
       .join("");
 
+    const MODE_LABELS = {
+      song_reconstruction: "Song reconstruction",
+      artist_general: "Artist's general sound",
+      descriptive_tone: "Descriptive tone",
+      hybrid: "Reference + custom changes",
+    };
+    const rejectedEffects = (i.rejected_effects || [])
+      .map(
+        (effect) => `
+      <div class="effect"><strong>${esc(effect.name)}</strong> &mdash; ${esc(effect.reason)}</div>
+    `
+      )
+      .join("");
+
     intentBox.innerHTML = `
       <h2>AI interpretation</h2>
+      ${i.mode ? `<p class="meta">Reading this as: ${esc(MODE_LABELS[i.mode] || i.mode)}</p>` : ""}
       <p>${esc(i.summary || query)}</p>
       <ul class="chips">${chips.map((x) => `<li class="chip">${esc(x)}</li>`).join("")}</ul>
       <div class="rig-guide">
@@ -227,6 +242,11 @@
       </div>
       ${i.interpretation_warning ? `<p class="error-text">${esc(i.interpretation_warning)}</p>` : ""}
       ${i.research_warning ? `<p class="meta">${esc(i.research_warning)}</p>` : ""}
+      ${
+        rejectedEffects
+          ? `<details class="research-notes"><summary>Effects considered but excluded (insufficient evidence)</summary>${rejectedEffects}</details>`
+          : ""
+      }
       ${
         i.research_notes
           ? `<details class="research-notes"><summary>${

@@ -1,7 +1,7 @@
 import unittest
 
 from gp50.catalog import GP50Catalog, score_effect_relevance
-from gp50.rig_builder import _best_amp, _matching_cab, _target_tone_from_intent, build_rig
+from gp50.rig_builder import SYSTEM, _best_amp, _matching_cab, _target_tone_from_intent, build_rig, importance_weight
 
 
 class RigBuilderTests(unittest.TestCase):
@@ -35,6 +35,22 @@ class RigBuilderTests(unittest.TestCase):
         self.assertIn('"function": "Repeats the signal', captured["prompt"])
         self.assertIn('"musical_profile"', captured["prompt"])
         self.assertIn('"module": "AMP"', captured["prompt"])
+        # web_research_notes is live-fetched external text (see SYSTEM's own
+        # disclaimer); the whole request/catalogue/intent blob must sit
+        # inside an explicit <data> boundary so the model has a textual line
+        # between "what I'm told to do" and "what I'm told about". (A retry
+        # addendum, if the model's first plan was rejected, is appended
+        # after </data> — see build_rig's `retry` handling — so check
+        # presence of both tags rather than the whole prompt's suffix.)
+        self.assertIn("<data>\n", captured["prompt"])
+        self.assertIn("\n</data>", captured["prompt"])
+        self.assertIn("not instructions", SYSTEM)
+        self.assertIn("web_research_notes", SYSTEM)
+
+    def test_importance_weight_maps_tiers_and_defaults_unknown_to_supporting(self):
+        self.assertEqual(importance_weight("essential"), 1.0)
+        self.assertEqual(importance_weight("optional"), 0.25)
+        self.assertEqual(importance_weight("not-a-tier"), 0.5)
 
     def test_prompt_tells_the_model_which_modules_share_one_slot(self):
         # A request whose intent names two PRE-flavored effects (compressor
