@@ -15,7 +15,7 @@ from .validator import MODULE_ORDER, RigValidationError, find_parameter, validat
 
 RIG_SCHEMA: dict[str, Any] = {
     "type": "object", "properties": {
-        "preset_name": {"type": "string", "maxLength": 16},
+        "preset_name": {"type": "string", "maxLength": 10},
         "summary": {"type": "string"},
         "signal_chain": {"type": "array", "maxItems": 8, "items": {"type": "object", "properties": {
             "module": {"type": "string"}, "fxid": {"type": "integer"}, "enabled": {"type": "boolean"},
@@ -29,50 +29,120 @@ Choose only from the supplied GP-50 catalogue. It is authoritative: never invent
 
 
 def _safe_preset_name(value: Any) -> str:
-    """Fit a name into the GP-50's 15-byte visible field plus NUL terminator."""
+    """Fit a name into what Valeton Suite's own preset browser actually
+    displays, which is shorter than the GP-50's 16-byte binary name field.
+
+    The field itself holds up to 15 usable characters + a NUL terminator
+    (`gp50/preset.py:NAME_TEXT_SIZE`) and the device's own screen shows a
+    full 15-character name correctly. But every real Suite-authored name
+    this project has seen tops out at 10 characters, and Suite's own
+    re-export of a this-project-generated 15-character name
+    ("The lead guitar") silently truncated it to 10 ("The lead g") on save —
+    while the original 15-character version showed blank in Suite's preset
+    list despite displaying correctly on the device (live report, 2026-09).
+    Capping here at Suite's real limit, not the hardware's, is what actually
+    avoids the blank-name bug end to end.
+    """
     name = str(value or "GP-50 Tone").strip() or "GP-50 Tone"
-    encoded = name.encode("latin-1", errors="replace")[:15]
+    encoded = name.encode("latin-1", errors="replace")[:10]
     return encoded.decode("latin-1", errors="replace").rstrip() or "GP-50 Tone"
 
 
 def _resolve_missing_fxid(raw: dict[str, Any], catalog: GP50Catalog) -> dict[str, Any] | None:
     """Map an effect role to one unambiguous GP-50 catalogue choice.
 
-    Local models sometimes supply a correct module and musical purpose but omit
-    the numeric `fxid`. The mapping is deliberately limited to canonical effect
-    roles; an unfamiliar request is left unresolved rather than guessed.
+    Local models sometimes supply a correct module and musical purpose but
+    omit the numeric `fxid`. Rather than a hand-maintained table of English
+    needles to specific model names (which has to be extended in Python
+    every time a new phrasing or a new catalogue model shows up, and can't
+    take advantage of a real, specific AI suggestion beyond whatever needles
+    someone thought to hardcode), this scores every candidate in the target
+    module the same way `_best_amp`/`_matching_cab`/`_pick_reverb` already
+    do: against the catalogue's own `musical_profile` (keywords/character/
+    best_for/roles) via `score_effect_relevance`. That data is the single
+    source of truth (see CLAUDE.md), so a block whose `purpose` genuinely
+    matches a model's documented character finds it without any code change
+    here — an unfamiliar or too-generic description simply scores 0 and is
+    left unresolved rather than guessed.
     """
     module = canonical_module(raw.get("module"))
     if module not in {"PRE", "DST", "EQ", "MOD", "DLY", "RVB"}:
         return None
     effects = catalog.effects_for_modules([module]).get(module, [])
-    description = " ".join(str(raw.get(key, "")) for key in ("effect_name", "name", "purpose", "summary")).lower()
-    preferred = {
-        "PRE": (("compress", "Comp"), ("boost", "Boost")),
-        "DST": (("overdrive", "OD"), ("light grit", "OD"), ("distortion", "Distortion"), ("fuzz", "Fuzz")),
-        "EQ": (("guitar", "Guitar EQ 1"), ("eq", "Guitar EQ 1")),
-        "MOD": (("tremolo", "O-Trem"), ("chorus", "A-Chorus"), ("vibrato", "Vibrato"), ("phaser", "O-Phase"), ("flanger", "Jet")),
-        "DLY": (("slap", "Slapback"), ("tape", "Tape"), ("analog", "Analog"), ("ping", "Ping Pong"), ("long", "Pure"), ("rhythmic", "Pure"), ("delay", "Pure")),
-        "RVB": (("plate", "Plate"), ("hall", "Hall"), ("spring", "Spring"), ("reverb", "Hall")),
-    }
-    for needle, name in preferred[module]:
-        if needle in description:
-            return next((effect for effect in effects if effect["name"].lower() == name.lower()), None) or next(
-                (effect for effect in effects if effect["type"].lower() == name.lower()), None
-            )
+    if not effects:
+        return None
+    description = " ".join(str(raw.get(key, "")) for key in ("effect_name", "name", "purpose", "summary"))
+    terms = _tokenize(description)
+    if terms:
+        best = max(effects, key=lambda e: _score_effect(e, terms))
+        if _score_effect(best, terms) > 0:
+            return best
     # Exact catalogue names remain safe even if the model calls the field
     # `name` instead of the schema's required numeric `fxid`.
-    return next((effect for effect in effects if effect["name"].lower() in description), None)
+    return next((effect for effect in effects if effect["name"].lower() in description.lower()), None)
 
 
-def _salvage_valid_blocks(result: dict[str, Any], catalog: GP50Catalog) -> dict[str, Any] | None:
+def _score_raw_block(raw: dict[str, Any], effect: dict[str, Any], payload: dict[str, Any], catalog: GP50Catalog) -> float:
+    """How well one already-resolved signal_chain block actually fits this
+    request — used only to break a tie when two blocks want the same
+    physical module (see `_keep_best_per_module`). Combines the block's own
+    stated purpose/name with the overall request's terms/target_tone, scored
+    the same way `_best_amp`/`_matching_cab`/`_pick_reverb`/
+    `_resolve_missing_fxid` already score a request against the catalogue's
+    own `musical_profile` data.
+    """
+    text = " ".join(str(raw.get(key, "")) for key in ("purpose", "effect_name", "name"))
+    terms = _fallback_terms(payload) | _tokenize(text)
+    return _score_effect(effect, terms, target_tone=_target_tone_from_intent(payload))
+
+
+def _keep_best_per_module(blocks: list[Any], payload: dict[str, Any], catalog: GP50Catalog) -> list[Any]:
+    """Keep, per physical GP-50 module, whichever candidate block actually
+    matches this request best — not just whichever the model happened to
+    list first.
+
+    Several modules bundle genuinely distinct effect roles onto one shared
+    hardware slot (`GP50Catalog.shared_effect_slots`: PRE holds one of
+    Comp/Boost/Filter/Pitch/Sim/Wah, not one of each — a tone that
+    legitimately calls for a wah *and* an octave *and* a boost still only
+    gets one). Rather than a fixed priority order between those roles (which
+    would just be a different kind of hardcoded guess — a wah matters more
+    than a boost for a funk tone, but a boost might matter more than a wah
+    for a solo-lift request), this asks the same relevance scoring
+    `_resolve_missing_fxid` and the amp/cab/reverb pickers already use to
+    judge which specific candidate best fits *this* request, and keeps that
+    one. A block whose `fxid`/`module` can't be resolved yet is left
+    untouched (not deduped) so `validate_rig` still reports its real problem
+    instead of it being silently dropped here.
+    """
+    best: dict[str, tuple[float, int]] = {}
+    kept: list[Any] = []
+    for block in blocks:
+        effect = catalog.get(block.get("fxid")) if isinstance(block, dict) else None
+        if effect is None:
+            kept.append(block)
+            continue
+        module = canonical_module(block.get("module"))
+        score = _score_raw_block(block, effect, payload, catalog)
+        if module in best:
+            prev_score, prev_index = best[module]
+            if score <= prev_score:
+                continue
+            kept[prev_index] = block
+            best[module] = (score, prev_index)
+        else:
+            best[module] = (score, len(kept))
+            kept.append(block)
+    return kept
+
+
+def _salvage_valid_blocks(result: dict[str, Any], catalog: GP50Catalog, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Keep only unambiguously repairable choices after two failed LLM attempts.
 
     Valid fxids are retained. Missing fxids can be repaired only from a known
     GP-50 module plus a canonical musical role (for example, plate reverb).
     """
     blocks = []
-    used_modules = set()
     for raw in result.get("signal_chain", []) if isinstance(result, dict) else []:
         if not isinstance(raw, dict):
             continue
@@ -83,17 +153,21 @@ def _salvage_valid_blocks(result: dict[str, Any], catalog: GP50Catalog) -> dict[
         parameters = raw.get("parameters", {})
         if effect is None or not isinstance(parameters, dict):
             continue
-        module = effect["module"]
-        # The first occurrence is the LLM's stated chain priority. A GP-50 has
-        # a single slot per module, so later duplicates cannot be represented.
-        if module in used_modules:
-            continue
-        used_modules.add(module)
-        blocks.append({"module": module, "fxid": effect["fxid"], "enabled": bool(raw.get("enabled", True)),
+        blocks.append({"module": effect["module"], "fxid": effect["fxid"], "enabled": bool(raw.get("enabled", True)),
                        "purpose": raw.get("purpose", "AI-selected supporting effect"), "parameters": parameters})
+    # A GP-50 has one physical slot per module (see
+    # GP50Catalog.shared_effect_slots); when two salvaged blocks want the
+    # same one, keep whichever actually fits this request best rather than
+    # just the model's emission order.
+    blocks = _keep_best_per_module(blocks, payload or {}, catalog)
     if not blocks:
         return None
-    plan = {"preset_name": _safe_preset_name(result.get("preset_name")),
+    # A model whose plan needed salvaging in the first place often also
+    # omitted (or mangled) `preset_name` itself — falling back straight to a
+    # fixed generic string ("GP-50 Tone" for every such rig) is a worse
+    # default than the user's own request text, which `_builtin_fallback`
+    # already uses in exactly this situation.
+    plan = {"preset_name": _safe_preset_name(result.get("preset_name") or (payload or {}).get("query")),
             "summary": result.get("summary", "Catalogue-corrected AI rig"), "signal_chain": blocks}
     try:
         rig = validate_rig(plan, catalog)
@@ -254,6 +328,79 @@ def _builtin_fallback(payload: dict[str, Any], catalog: GP50Catalog) -> dict[str
         "amp/cab starting point was used; add or adjust effects in the editor."
     )
     return rig
+
+
+_DRY_REQUEST_PHRASES = ("no reverb", "without reverb", "reverb-free", "skip the reverb", "completely dry", "bone dry", "totally dry")
+
+
+def _wants_no_reverb(payload: dict[str, Any]) -> bool:
+    """A request that explicitly asks to stay dry overrides the default touch of reverb below."""
+    intent = payload.get("intent", {}) if isinstance(payload.get("intent"), dict) else {}
+    text = " ".join([
+        str(payload.get("query", "")),
+        *map(str, intent.get("character", []) or []),
+    ]).lower()
+    if any(phrase in text for phrase in _DRY_REQUEST_PHRASES):
+        return True
+    # "dry" alone (not part of "dry humor" etc.) describing the requested tone,
+    # with nothing else in the request naming reverb, is a real preference too.
+    return "dry" in _tokenize(text) and "reverb" not in text
+
+
+def _pick_reverb(payload: dict[str, Any], catalog: GP50Catalog) -> dict[str, Any] | None:
+    """Choose a genre-appropriate reverb model from the catalogue's own
+    musical_profile data (keywords/character/best_for), the same
+    terms/target_tone scoring `_best_amp`/`_matching_cab` already use — so a
+    request naming a style (surf, shoegaze, studio, church/cinematic) lands on
+    the matching catalogue reverb, and a request with no such cue falls back
+    to Room: the catalogue's own "subtle ambience that doesn't wash out fast
+    playing" / "tightening up a dry direct tone" model, i.e. the safest
+    least-intrusive default touch of reverb.
+    """
+    effects = catalog.effects_for_modules(["RVB"]).get("RVB", [])
+    if not effects:
+        return None
+    terms = _fallback_terms(payload)
+    target_tone = _target_tone_from_intent(payload)
+    best = max(effects, key=lambda e: _score_effect(e, terms, target_tone=target_tone))
+    if _score_effect(best, terms, target_tone=target_tone) > 0:
+        return best
+    return next((e for e in effects if e["name"] == "Room"), effects[0])
+
+
+def _ensure_reverb(rig: dict[str, Any], payload: dict[str, Any], catalog: GP50Catalog) -> tuple[dict[str, Any], str]:
+    """Add a conservative, genre-matched reverb block when the model's plan
+    has none.
+
+    A real amp/cab tone is almost never fully dry, but `_relevant_modules`'s
+    own comment notes the interpretation step is deliberately conservative
+    about which effects it lists — so a request that never says "reverb" or
+    "space" routinely produces a plan with no RVB block at all, even though
+    RVB was schema-offered the whole time (see `_relevant_modules`). Filling
+    that gap here, once, after the model's own choices are finalized, means
+    every generated preset gets a tasteful touch of it unless the request
+    was explicitly dry. `_review_effect_sympathy` still applies its usual
+    conservative Mix/Decay ceiling to whatever block lands here, exactly as
+    it would to a model-chosen one.
+    """
+    if any(block["module"] == "RVB" for block in rig["signal_chain"]):
+        return rig, ""
+    if _wants_no_reverb(payload):
+        return rig, ""
+    reverb = _pick_reverb(payload, catalog)
+    if reverb is None:
+        return rig, ""
+    blocks = deepcopy(rig["signal_chain"])
+    blocks.append({
+        "module": "RVB", "fxid": reverb["fxid"], "enabled": True,
+        "purpose": "Default touch of reverb: not part of the AI plan, added because a real amp tone is rarely fully dry.",
+        "parameters": {},
+    })
+    updated = validate_rig({"preset_name": rig["preset_name"], "summary": rig["summary"], "signal_chain": blocks}, catalog)
+    if rig.get("validation_warning"):
+        updated["validation_warning"] = rig["validation_warning"]
+    note = f'{reverb["name"]} reverb added by default (not requested); kept subtle — adjust or remove it in the editor if you want a fully dry tone.'
+    return updated, note
 
 
 def _add_builtin_backbone(rig: dict[str, Any], payload: dict[str, Any], catalog: GP50Catalog) -> dict[str, Any]:
@@ -426,7 +573,8 @@ def _review_effect_sympathy(
             spacious = any(word in requested for word in ("long", "large", "hall", "plate", "ambient", "space"))
             mix = conservative(block, ("Mix",), 20, 28)
             decay = conservative(block, ("Decay",), 42 if spacious else 30, 55)
-            notes.append(f"Reverb retained for the request; mix {int(mix or 0)} and decay {int(decay or 0)} preserve note definition.")
+            if not str(block.get("purpose", "")).startswith("Default touch of reverb"):
+                notes.append(f"Reverb retained for the request; mix {int(mix or 0)} and decay {int(decay or 0)} preserve note definition.")
         elif module in {"MOD", "PRE", "DST", "EQ"}:
             notes.append(f"{block['effect_name']} retained because it matches a requested tonal role.")
 
@@ -540,9 +688,12 @@ def _describe_signal_chain(signal_chain: list[dict[str, Any]], catalog: GP50Cata
 
 def _finalize_rig(rig: dict[str, Any], payload: dict[str, Any], catalog: GP50Catalog) -> dict[str, Any]:
     rig, reference_notes, locked = _apply_reference_settings(rig, payload, catalog)
-    finalized = _review_effect_sympathy(_manage_gain(rig, payload, catalog, locked), payload, catalog, locked)
+    rig, reverb_note = _ensure_reverb(_manage_gain(rig, payload, catalog, locked), payload, catalog)
+    finalized = _review_effect_sympathy(rig, payload, catalog, locked)
     if reference_notes:
         finalized["effect_review"] = reference_notes + list(finalized.get("effect_review", []))
+    if reverb_note:
+        finalized["effect_review"] = list(finalized.get("effect_review", [])) + [reverb_note]
     recap = _describe_signal_chain(finalized["signal_chain"], catalog)
     if recap:
         narrative = str(finalized.get("summary", "")).strip()
@@ -562,6 +713,37 @@ def _finalize_rig(rig: dict[str, Any], payload: dict[str, Any], catalog: GP50Cat
     return finalized
 
 
+def _slot_sharing_guidance(catalog: GP50Catalog) -> str:
+    """Spell out, from the catalogue's own module/type data (see
+    `GP50Catalog.shared_effect_slots`), which modules bundle several
+    unrelated effect types onto one physical slot — so the model is told
+    explicitly, rather than left to infer it from the JSON grouping, that a
+    request naming two effects landing in the same module needs a choice
+    made between them, not both included. This text depends only on the
+    catalogue (not the current request), so it's identical on every call —
+    safe to prepend to the constant part of the prompt without hurting the
+    KV-cache prefix match `build_rig` relies on (see its own comment on
+    `gp50_catalogue` ordering).
+    """
+    # AMP/CAB also have multiple `type` values (Clean/Drive/Hi Gain, etc.),
+    # but "pick exactly one amp model" is already obvious and separately
+    # instructed just above — that's a single ordinary choice, not several
+    # unrelated effect categories fighting for one slot. Limiting this note
+    # to the genuinely surprising cases keeps the signal sharp instead of
+    # diluting it (and keeps the prompt smaller — see CLAUDE.md on prompt size).
+    shared = {module: types for module, types in catalog.shared_effect_slots().items() if module not in {"AMP", "CAB"}}
+    if not shared:
+        return ""
+    parts = [f"{module} (one slot, choose from: {', '.join(types)})" for module, types in sorted(shared.items())]
+    return (
+        " The GP-50 has exactly one hardware slot per module. Some modules bundle several unrelated "
+        "effect types onto that single shared slot rather than one type each: " + "; ".join(parts) + ". "
+        "If the request calls for two effects that land in the same module (e.g. a compressor and a wah), "
+        "the hardware genuinely cannot run both at once — choose whichever matters most for this tone and "
+        "leave the other out, rather than trying to fit both in."
+    )
+
+
 def build_rig(payload: dict[str, Any], lm_json: Callable[..., Any], catalog: GP50Catalog | None = None) -> dict[str, Any]:
     catalog = catalog or default_catalog()
     modules = _relevant_modules(payload, catalog)
@@ -573,6 +755,7 @@ def build_rig(payload: dict[str, Any], lm_json: Callable[..., Any], catalog: GP5
         "`interpreted_tone_intent.reference_settings` names a real amp/pedal, prefer the catalogue model whose "
         "`origin`/`name` names that same device if it's musically appropriate — its sourced settings are applied "
         "automatically afterward, onto that specific block only; a different model is never given someone else's numbers."
+        + _slot_sharing_guidance(catalog)
     )
     # AMP (32 models) and CAB (41) dwarf every other module and dominate
     # prompt size; narrow those to the highest-relevance-scored options
@@ -614,6 +797,15 @@ def build_rig(payload: dict[str, Any], lm_json: Callable[..., Any], catalog: GP5
         result = lm_json(SYSTEM, prompt + retry, schema, temperature=0.15 if attempt == 0 else 0)
         last_result = result
         result["preset_name"] = _safe_preset_name(result.get("preset_name"))
+        # The schema only constrains *which* fxids are valid, not that two of
+        # them don't want the same physical module — a request that
+        # legitimately calls for several PRE-type roles at once (wah, octave,
+        # boost) can make the model return more than one. Resolve that here,
+        # by relevance to this request, instead of letting validate_rig's
+        # hard "GP-50 has only one X block" error burn a retry (or fall all
+        # the way to salvage) over something with a principled answer.
+        if isinstance(result.get("signal_chain"), list):
+            result["signal_chain"] = _keep_best_per_module(result["signal_chain"], payload, catalog)
         try:
             rig = validate_rig(result, catalog)
             selected = {block["module"] for block in rig["signal_chain"]}
@@ -623,7 +815,7 @@ def build_rig(payload: dict[str, Any], lm_json: Callable[..., Any], catalog: GP5
             return _finalize_rig(rig, payload, catalog)
         except RigValidationError as exc:
             last_error = exc
-    salvaged = _salvage_valid_blocks(last_result, catalog)
+    salvaged = _salvage_valid_blocks(last_result, catalog, payload)
     if salvaged:
         selected = {block["module"] for block in salvaged["signal_chain"]}
         missing = [module for module in ("AMP", "CAB") if module not in selected]

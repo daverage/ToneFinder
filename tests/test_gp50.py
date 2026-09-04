@@ -85,7 +85,11 @@ class GP50Tests(unittest.TestCase):
         self.assertEqual(output[0x14], crc8_07(output[0x15:]))
 
     def test_preset_name_reserves_a_null_terminator(self):
-        plan = self.plan(); plan["preset_name"] = "FifteenLetters!"
+        # 10 characters is validate_rig's max (see its comment: Valeton
+        # Suite's own preset browser silently truncates/blanks names longer
+        # than 10, even though this 16-byte binary field and the GP-50's own
+        # screen both handle up to 15 usable characters fine).
+        plan = self.plan(); plan["preset_name"] = "TenLetters"
         raw = bytearray(FILE_SIZE)
         offsets = {"models": 64, "bypass": 112, "order": 124, "params": 144, "footswitches": 480}
         for name, pos in offsets.items(): raw[pos:pos + 4] = RECORDS[name]
@@ -93,8 +97,8 @@ class GP50Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             template = Path(directory) / "blank.prst"; template.write_bytes(raw)
             output = create_preset(plan, template, self.catalog)
-        self.assertEqual(output[0x19:0x28], b"FifteenLetters!")
-        self.assertEqual(output[0x28], 0)
+        self.assertEqual(output[0x19:0x23], b"TenLetters")
+        self.assertEqual(output[0x23], 0)
 
     def _order_template(self, directory):
         """A minimal blank template with just the five binary records this

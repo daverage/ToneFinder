@@ -85,8 +85,16 @@ def validate_rig(plan: dict[str, Any], catalog: GP50Catalog | None = None) -> di
     name = str(plan.get("preset_name", "")).strip()
     if not name:
         errors.append("preset_name is required")
-    elif len(name.encode("latin-1", errors="replace")) > 15:
-        errors.append("preset_name exceeds the GP-50 15-character display limit")
+    elif len(name.encode("latin-1", errors="replace")) > 10:
+        # The GP-50's binary name field holds 15 usable characters and the
+        # device screen shows all of them correctly, but Valeton Suite's own
+        # preset browser does not: a live report showed a 15-character name
+        # from this project displaying blank in Suite despite showing fine
+        # on the device, and Suite's own re-export of that same preset
+        # silently truncated the name to 10 characters on save. Every real
+        # Suite-authored name this project has on file is <=10 characters
+        # too. 10 is Suite's real limit, not the hardware's.
+        errors.append("preset_name exceeds the 10-character limit Valeton Suite's preset browser actually displays")
     chain = plan.get("signal_chain")
     if not isinstance(chain, list) or len(chain) > 10:
         errors.append("signal_chain must contain at most 10 blocks")

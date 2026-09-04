@@ -69,6 +69,21 @@ class MusicalMatchingTests(unittest.TestCase):
         filter_param = next(p for p in darktale["params"] if p["name"] == "Filter")
         self.assertIn("darker", filter_param["semantic"]["high"])
 
+    def test_shared_effect_slots_finds_pre_dst_mod_as_multi_role_modules(self):
+        # These three modules each hold several genuinely distinct effect
+        # types (compressor vs. wah, overdrive vs. fuzz, chorus vs. tremolo)
+        # on one physical GP-50 slot — a real hardware constraint, derived
+        # here from the catalogue's own module/type data rather than a
+        # hardcoded list, so it can't drift out of sync as the catalogue
+        # changes. NR/EQ/DLY/RVB are homogeneous (one type each) and must
+        # not appear.
+        shared = self.catalog.shared_effect_slots()
+        self.assertEqual(set(shared["PRE"]), {"Boost", "Comp", "Filter", "Pitch", "Sim", "Wah"})
+        self.assertEqual(set(shared["DST"]), {"Bass Drive", "Distortion", "Fuzz", "OD"})
+        self.assertEqual(set(shared["MOD"]), {"Chorus", "Flanger", "Phaser", "Tremolo", "Vibrato"})
+        for homogeneous in ("NR", "EQ", "DLY", "RVB"):
+            self.assertNotIn(homogeneous, shared)
+
 
 if __name__ == "__main__":
     unittest.main()

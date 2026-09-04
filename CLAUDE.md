@@ -123,10 +123,71 @@ so those later safety passes never overwrite an explicitly sourced value.
 returning it — this is display-only bookkeeping (the model may emit blocks
 in any order, e.g. AMP before a PRE compressor) and has no effect on the
 binary preset, since `create_preset` writes each block by its own fixed
-`module_id` offset regardless of list position. `_relevant_modules` always
+`module_id` offset regardless of list position. **Every module is exactly one hardware slot, and several modules bundle
+multiple, genuinely unrelated effect types onto that one slot** — this is
+real GP-50 layout (`GP50Catalog.shared_effect_slots()`, derived from each
+catalogue effect's own `module`/`type` fields, not an editorial grouping):
+`PRE` holds one model at a time chosen from Comp/Boost/Filter/Pitch/Sim/Wah,
+`DST` from OD/Distortion/Fuzz/Bass Drive, `MOD` from Chorus/Flanger/Phaser/
+Tremolo/Vibrato. `NR`/`EQ`/`DLY`/`RVB` are homogeneous (one type each), so
+their one-slot limit is just "pick a model," not "pick a role." A request
+naming two effects that land in the same module (a compressor and a wah, an
+overdrive and a fuzz) is asking for something the hardware cannot do at
+once — `validate_rig` still enforces the resulting "GP-50 has only one
+{module} block" as a hard error if it ever reaches validation, but the LLM
+used to only be told "use at most one model per module" with no explanation
+of *why* a PRE choice and a MOD choice are different kinds of constraint.
+`build_rig`'s `_slot_sharing_guidance` now spells this out explicitly in the
+prompt, generated from `shared_effect_slots()` (so it can't drift from the
+catalogue), rather than leaving it implicit in the JSON's module grouping.
+
+A model can still legitimately want several roles from the same shared slot
+in one plan (a wah, an octave texture, and a solo boost are all genuinely
+useful for different moments of the same tone, even though only one can
+occupy PRE) — rather than letting that burn a retry against `validate_rig`'s
+hard error, `_keep_best_per_module` runs on the model's raw `signal_chain`
+*before* validation (both on the main LLM path and inside
+`_salvage_valid_blocks`) and, per module, keeps whichever candidate's own
+`purpose` text actually scores highest against the request via
+`score_effect_relevance` (`_score_raw_block`) — the same mechanism
+`_best_amp`/`_matching_cab`/`_pick_reverb`/`_resolve_missing_fxid` already
+use. There's deliberately no fixed priority order between roles (wah beats
+boost for a funk request; boost might beat wah for a solo-lift request) —
+that would just be a different hardcoded guess wearing a different
+disguise. A tie (e.g. no purpose text to score at all) keeps whichever
+candidate came first, deterministically.
+
+`_resolve_missing_fxid` (used by `_salvage_valid_blocks` when a model
+supplies a role/purpose but omits the numeric `fxid`) resolves the same way
+`_best_amp`/`_matching_cab`/`_pick_reverb` already do — scoring every
+candidate in that module against the catalogue's own `musical_profile` data
+via `score_effect_relevance` — rather than a hand-maintained table of
+English needles mapped to specific model names, so a genuinely apt
+suggestion (a wah-flavored purpose landing on `C-Wah` vs. a touch/envelope
+one landing on `Toucher`) is found from real catalogue data instead of
+requiring a Python-side edit every time a new phrasing or model appears.
+
+`_relevant_modules` always
 offers RVB alongside AMP/CAB (not gated on the interpreted intent naming
 reverb explicitly) so a request that never says "reverb" isn't structurally
-prevented from getting a schema-valid touch of one.
+prevented from getting a schema-valid touch of one. In practice the model's
+own interpretation step is deliberately conservative about which effects it
+lists (`make_search_plan`'s instructions say to name only effects that
+"meaningfully help"), so most amp-only requests never end up with an RVB
+block even though one was schema-offered the whole time. `_finalize_rig`
+closes that gap with `_ensure_reverb`, run after `_manage_gain` and before
+`_review_effect_sympathy`: if the plan still has no RVB block and the
+request wasn't explicitly dry (`_wants_no_reverb` — "no reverb"/"dry"/etc.),
+it picks a genre-matched reverb model from the catalogue's own
+`musical_profile` data via the same `score_effect_relevance`/`target_tone`
+scoring `_best_amp`/`_matching_cab` already use (e.g. "surf" → Spring,
+"shoegaze"/"ambient wash" → Deepsea/Sweet Space, "church"/"cinematic" →
+Church), falling back to Room — the catalogue's own subtlest, least-
+intrusive model — when nothing scores. The added block then goes through
+`_review_effect_sympathy` exactly like a model-chosen one, so it gets the
+same conservative Mix/Decay ceiling; a distinct `effect_review` note marks
+it as an unrequested default so the UI can tell a user it was added and can
+be removed.
 
 The GP-50's `order` binary record is the **DSP signal-chain order**
 (`order[chain_position] = module_id`), not footswitch assignment — an
@@ -168,6 +229,15 @@ dict; anything absent would otherwise silently keep whatever value the blank
 template happens to have at that offset, unrelated to the effect actually
 selected. Every rig, however it was produced (LLM, salvage, builtin
 fallback), must go through `validate_rig` for this reason alone.
+
+Preset names are capped at **10 characters**, not the GP-50 binary field's
+15-usable-byte capacity — `gp50/validator.py:validate_rig` and
+`gp50/rig_builder.py:_safe_preset_name` both enforce this. Resolved 2026-09
+from a live round trip: a 15-character generated name displayed correctly
+on the GP-50 itself but blank in Valeton Suite's preset list, and
+re-exporting that same file from Suite's own save path silently truncated
+it to 10 characters — Suite's real limit is shorter than the hardware's.
+See `docs/GP50_PRST_FORMAT.md`'s Name field note for the full evidence.
 
 `gp50/preset.py` edits a real 552-byte blank GP-50 export
 (`data/blank_gp50.prst`, must be supplied — never synthesized) by locating

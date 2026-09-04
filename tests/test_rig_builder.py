@@ -36,6 +36,61 @@ class RigBuilderTests(unittest.TestCase):
         self.assertIn('"musical_profile"', captured["prompt"])
         self.assertIn('"module": "AMP"', captured["prompt"])
 
+    def test_prompt_tells_the_model_which_modules_share_one_slot(self):
+        # A request whose intent names two PRE-flavored effects (compressor
+        # and wah) both compete for the GP-50's single PRE slot — the model
+        # needs this spelled out or it may not realize only one can survive
+        # validation. See gp50.catalog.GP50Catalog.shared_effect_slots and
+        # gp50.rig_builder._slot_sharing_guidance.
+        catalog = GP50Catalog()
+        captured = {}
+
+        def fake_lm(system, user, schema, **kwargs):
+            captured["prompt"] = user
+            amp = catalog.effects_for_modules(["AMP"])["AMP"][0]
+            cab = catalog.effects_for_modules(["CAB"])["CAB"][0]
+            return {"preset_name": "Test", "summary": "test", "signal_chain": [
+                {"module": "AMP", "fxid": amp["fxid"], "enabled": True, "purpose": "amp", "parameters": {}},
+                {"module": "CAB", "fxid": cab["fxid"], "enabled": True, "purpose": "cab", "parameters": {}},
+            ]}
+
+        build_rig({"query": "funk rhythm"}, fake_lm, catalog)
+        self.assertIn("one hardware slot per module", captured["prompt"])
+        self.assertIn("PRE (one slot, choose from:", captured["prompt"])
+        self.assertIn("Wah", captured["prompt"])
+
+    def test_multiple_pre_candidates_are_resolved_by_relevance_not_order(self):
+        # PRE holds one of Comp/Boost/Filter/Pitch/Sim/Wah at a time (see
+        # GP50Catalog.shared_effect_slots). A tone can legitimately call for
+        # several of those roles at once — a wah, an octave texture, a solo
+        # boost — but the hardware only has room for one. `_keep_best_per_
+        # module` (wired into build_rig before validate_rig) resolves that
+        # by scoring each candidate's own purpose text against the request,
+        # the same mechanism `_resolve_missing_fxid` etc. already use — not
+        # by which one the model happened to list first (here, deliberately,
+        # the weakest match — Boost — is listed first, to prove order isn't
+        # what decides it).
+        catalog = GP50Catalog()
+        amp = catalog.effects_for_modules(["AMP"])["AMP"][0]
+        cab = catalog.effects_for_modules(["CAB"])["CAB"][0]
+        wah = next(e for e in catalog.effects_for_modules(["PRE"])["PRE"] if e["name"] == "C-Wah")
+        octa = next(e for e in catalog.effects_for_modules(["PRE"])["PRE"] if e["name"] == "OCTA")
+        boost = next(e for e in catalog.effects_for_modules(["PRE"])["PRE"] if e["name"] == "B-Boost")
+
+        def fake_lm(system, user, schema, **kwargs):
+            return {"preset_name": "Funk", "summary": "test", "signal_chain": [
+                {"module": "AMP", "fxid": amp["fxid"], "enabled": True, "purpose": "amp", "parameters": {}},
+                {"module": "CAB", "fxid": cab["fxid"], "enabled": True, "purpose": "cab", "parameters": {}},
+                {"module": "PRE", "fxid": boost["fxid"], "enabled": True, "purpose": "slight solo lift", "parameters": {}},
+                {"module": "PRE", "fxid": octa["fxid"], "enabled": True, "purpose": "octave-up texture on the outro", "parameters": {}},
+                {"module": "PRE", "fxid": wah["fxid"], "enabled": True, "purpose": "classic funk rhythm wah cry baby sweep", "parameters": {}},
+            ]}
+
+        rig = build_rig({"query": "funk rhythm wah guitar"}, fake_lm, catalog)
+        pre_blocks = [b for b in rig["signal_chain"] if b["module"] == "PRE"]
+        self.assertEqual(len(pre_blocks), 1)
+        self.assertEqual(pre_blocks[0]["effect_name"], "C-Wah")
+
     def test_builtin_mode_requires_and_returns_an_amp_and_cab(self):
         catalog = GP50Catalog()
         amp = catalog.effects_for_modules(["AMP"])["AMP"][0]
@@ -48,7 +103,11 @@ class RigBuilderTests(unittest.TestCase):
             ]}
 
         rig = build_rig({"query": "warm clean", "use_builtin_amp_cab": True}, fake_lm, catalog)
-        self.assertEqual({block["module"] for block in rig["signal_chain"]}, {"AMP", "CAB"})
+        # RVB is included even though the model's plan never named it: a real
+        # amp tone is rarely fully dry, so `_ensure_reverb` fills that gap
+        # with a conservative default touch of it (see test_rig_builder's
+        # ReverbDefaultTests below for that behavior in isolation).
+        self.assertEqual({block["module"] for block in rig["signal_chain"]}, {"AMP", "CAB", "RVB"})
 
     def test_builtin_mode_salvages_duplicate_single_slot_effects(self):
         catalog = GP50Catalog()
@@ -67,8 +126,10 @@ class RigBuilderTests(unittest.TestCase):
         rig = build_rig({"query": "voxy", "use_builtin_amp_cab": True}, fake_lm, catalog)
         # The duplicate PRE block is dropped (one block per module), and the
         # surviving blocks are returned in real GP-50 hardware signal order
-        # (PRE before AMP/CAB — see MODULE_ORDER), not emission order.
-        self.assertEqual([block["module"] for block in rig["signal_chain"]], ["PRE", "AMP", "CAB"])
+        # (PRE before AMP/CAB, RVB last — see MODULE_ORDER), not emission
+        # order. RVB itself was never in the model's plan; `_ensure_reverb`
+        # adds a conservative default touch of it.
+        self.assertEqual([block["module"] for block in rig["signal_chain"]], ["PRE", "AMP", "CAB", "RVB"])
         amp_block = next(b for b in rig["signal_chain"] if b["module"] == "AMP")
         self.assertEqual(amp_block["parameters"]["Tone Cut"], 42.0)
 
@@ -82,8 +143,8 @@ class RigBuilderTests(unittest.TestCase):
             ]}
 
         rig = build_rig({"query": "Vox chime", "use_builtin_amp_cab": True}, fake_lm, catalog)
-        self.assertEqual({block["module"] for block in rig["signal_chain"]}, {"AMP", "CAB"})
-        self.assertLessEqual(len(rig["preset_name"].encode("latin-1")), 16)
+        self.assertEqual({block["module"] for block in rig["signal_chain"]}, {"AMP", "CAB", "RVB"})
+        self.assertLessEqual(len(rig["preset_name"].encode("latin-1")), 10)
         self.assertIn("did not provide valid", rig["validation_warning"])
 
     def test_builtin_mode_translates_known_effect_roles_without_fxids(self):
@@ -100,7 +161,13 @@ class RigBuilderTests(unittest.TestCase):
         rig = build_rig({"query": "U2 Streets", "use_builtin_amp_cab": True}, fake_lm, catalog)
         self.assertEqual({block["module"] for block in rig["signal_chain"]}, {"PRE", "DST", "AMP", "CAB", "DLY", "RVB"})
         names = {block["effect_name"] for block in rig["signal_chain"]}
-        self.assertTrue({"COMP", "Green OD", "Pure", "Plate"}.issubset(names))
+        # Resolved by scoring each purpose against the catalogue's own
+        # musical_profile data (see _resolve_missing_fxid), not a hardcoded
+        # keyword->model table — so "light overdrive grit" lands on Yellow OD
+        # (catalogue role "light_drive") rather than an arbitrary fixed OD
+        # pick, and "large plate reverb" lands on "Plate L" (the catalogue's
+        # own bigger plate) rather than plain "Plate".
+        self.assertTrue({"COMP", "Yellow OD", "Pure", "Plate L"}.issubset(names))
 
     def test_high_gain_plan_is_capped_and_gets_a_noise_gate(self):
         catalog = GP50Catalog()
@@ -312,7 +379,9 @@ class SignalChainOrderingTests(unittest.TestCase):
 
         rig = build_rig({"query": "compressed clean tone", "intent": {"effects": [{"name": "Comp", "purpose": "even out picking", "starting_point": "moderate"}]}}, fake_lm, catalog)
         modules = [block["module"] for block in rig["signal_chain"]]
-        self.assertEqual(modules, ["PRE", "AMP", "CAB"])
+        # RVB trails, both in default hardware order and because
+        # `_ensure_reverb` appends its default touch of reverb last.
+        self.assertEqual(modules, ["PRE", "AMP", "CAB", "RVB"])
 
     def test_reverb_module_is_always_offered_even_when_intent_never_names_it(self):
         catalog = GP50Catalog()
@@ -334,6 +403,66 @@ class SignalChainOrderingTests(unittest.TestCase):
         # RVB must still be schema-offered so the model isn't structurally
         # prevented from adding a touch of it when musically appropriate.
         build_rig({"query": "tight metal rhythm", "intent": {"effects": []}}, fake_lm, catalog)
+
+
+class DefaultReverbTests(unittest.TestCase):
+    """`_ensure_reverb` fills the gap left by the model's own conservative
+    interpretation step: a real amp tone is rarely fully dry, but a request
+    that never literally says "reverb" routinely produces a plan with no RVB
+    block even though RVB is always schema-offered."""
+
+    def _amp_cab_only_rig(self, query: str, intent: dict | None = None):
+        catalog = GP50Catalog()
+        amp = catalog.effects_for_modules(["AMP"])["AMP"][0]
+        cab = catalog.effects_for_modules(["CAB"])["CAB"][0]
+
+        def fake_lm(system, user, schema, **kwargs):
+            return {"preset_name": "Test", "summary": "test", "signal_chain": [
+                {"module": "AMP", "fxid": amp["fxid"], "enabled": True, "purpose": "amp", "parameters": {}},
+                {"module": "CAB", "fxid": cab["fxid"], "enabled": True, "purpose": "cab", "parameters": {}},
+            ]}
+
+        payload = {"query": query}
+        if intent is not None:
+            payload["intent"] = intent
+        return build_rig(payload, fake_lm, catalog), catalog
+
+    def test_a_default_reverb_is_added_when_the_model_omits_one(self):
+        rig, catalog = self._amp_cab_only_rig("warm clean tone")
+        reverb = next((b for b in rig["signal_chain"] if b["module"] == "RVB"), None)
+        self.assertIsNotNone(reverb)
+        self.assertTrue(reverb["enabled"])
+        # Kept subtle, same ceiling `_review_effect_sympathy` gives any RVB block.
+        self.assertLessEqual(reverb["parameters"]["Mix"], 28)
+        self.assertTrue(any("added by default" in note for note in rig["effect_review"]))
+
+    def test_genre_cues_pick_a_matching_reverb_type(self):
+        rig, _ = self._amp_cab_only_rig("surf rock vintage clean tone")
+        reverb = next(b for b in rig["signal_chain"] if b["module"] == "RVB")
+        self.assertEqual(reverb["effect_name"], "Spring")
+
+    def test_no_reverb_is_added_when_the_request_is_explicitly_dry(self):
+        rig, _ = self._amp_cab_only_rig("tight, completely dry funk rhythm tone")
+        self.assertNotIn("RVB", {b["module"] for b in rig["signal_chain"]})
+
+    def test_a_model_chosen_reverb_is_not_overridden_or_duplicated(self):
+        catalog = GP50Catalog()
+        amp = catalog.effects_for_modules(["AMP"])["AMP"][0]
+        cab = catalog.effects_for_modules(["CAB"])["CAB"][0]
+        hall = next(e for e in catalog.effects_for_modules(["RVB"])["RVB"] if e["name"] == "Hall")
+
+        def fake_lm(system, user, schema, **kwargs):
+            return {"preset_name": "Test", "summary": "test", "signal_chain": [
+                {"module": "AMP", "fxid": amp["fxid"], "enabled": True, "purpose": "amp", "parameters": {}},
+                {"module": "CAB", "fxid": cab["fxid"], "enabled": True, "purpose": "cab", "parameters": {}},
+                {"module": "RVB", "fxid": hall["fxid"], "enabled": True, "purpose": "space", "parameters": {}},
+            ]}
+
+        rig = build_rig({"query": "ambient wash"}, fake_lm, catalog)
+        reverbs = [b for b in rig["signal_chain"] if b["module"] == "RVB"]
+        self.assertEqual(len(reverbs), 1)
+        self.assertEqual(reverbs[0]["effect_name"], "Hall")
+        self.assertFalse(any("added by default" in note for note in rig["effect_review"]))
 
 
 if __name__ == "__main__": unittest.main()

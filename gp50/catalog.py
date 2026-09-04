@@ -209,6 +209,25 @@ class GP50Catalog:
                     modules.setdefault(effect["module"], set()).update(k.lower() for k in keywords)
         return modules
 
+    def shared_effect_slots(self) -> dict[str, list[str]]:
+        """Modules whose single hardware slot hosts more than one genuinely
+        distinct effect `type` — e.g. PRE holds one model at a time chosen
+        from Comp/Boost/Filter/Pitch/Sim/Wah, not one of each. This is real
+        GP-50 layout (confirmed from the catalogue's own per-effect `module`/
+        `type` fields), not an editorial grouping, and it means a request
+        naming two effects that land in the same module (a compressor and a
+        wah, say) is asking for something the hardware cannot do
+        simultaneously — one has to be dropped, not both fit in. Used to
+        make that constraint explicit to the rig-building LLM (see
+        `gp50.rig_builder.build_rig`) instead of leaving it implicit in the
+        catalogue's grouping and hoping the model infers it.
+        """
+        types_by_module: dict[str, set[str]] = {}
+        for effects in self.data.get("modules", {}).values():
+            for effect in effects:
+                types_by_module.setdefault(effect["module"], set()).add(effect["type"])
+        return {module: sorted(types) for module, types in types_by_module.items() if len(types) > 1}
+
     def _profile_label(self, effect: dict[str, Any]) -> str:
         """Key identifying this effect's functional description in the prompt
         legend: most effects share one entry per `type`, but models with

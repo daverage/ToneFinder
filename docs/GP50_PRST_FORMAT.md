@@ -41,9 +41,25 @@ table lives in `5868USB.dylib` at a fixed offset, shared with that binary's
 bundled FLAC decoder). It is computed over `prst[0x15:]` — from the sentinel
 through the end of the file, i.e. name + body, not including the header.
 
-**Name field**: 16 bytes, but only the first 15 are usable — the final byte
-must stay `\0` as a terminator, or Suite discards the whole field (confirmed
-independently by this project; not mentioned by the external one).
+**Name field**: 16 bytes, up to 15 usable characters + a NUL terminator —
+and the GP-50 hardware screen correctly displays a name using the full 15.
+But **Valeton Suite's own preset browser has a shorter real limit: 10
+characters, not 15.** Resolved 2026-09 from a live round trip: this
+project generated a preset named "The lead guitar" (15 characters); it
+showed correctly on the device but blank in Suite's preset list. Importing
+that file into Suite and re-exporting it *from Suite itself*, unedited,
+produced a file with the name silently truncated to "The lead g" (10
+characters) — Suite's own save path drops anything past 10. Every other
+real Suite-authored name this project has on file independently tops out
+at 10 characters too (`Pure Clean`, `Mick Ronso` — itself very likely a
+Suite-side truncation of a longer intended "Mick Ronson"). One earlier real
+export (`data/Mick Ronson Lead (1).prst`, 16 characters, no terminator) is
+consistent with this same limit rather than a counterexample to it — it's
+simply another name too long for Suite to render, not evidence a full 16
+bytes works. `gp50/validator.py` and `gp50/rig_builder.py` enforce the
+10-character limit upstream of this module for exactly this reason;
+`preset.py`'s own 15-usable-byte ceiling is only a defensive fallback
+against the binary field itself.
 
 ## 2. Body records (TLV, found by magic bytes — not fixed offsets)
 
